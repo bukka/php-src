@@ -2529,12 +2529,13 @@ PHP_FUNCTION(array_count_values)
    value_key and optionally indexed by the index_key */
 PHP_FUNCTION(array_column)
 {
-	zval *zarray, *zcolumn, *zkey = NULL, **data, **zcolval, **zkeyval, *zcolumn_copy = NULL, *zkey_copy = NULL, *zkeyval_copy = NULL;
+	zval *zarray, *zcolumn, *zkey = NULL, **data, **zcolval, **zkeyval, zcolumn_copy, zkey_copy, zkeyval_copy;
 	HashTable *arr_hash;
 	HashPosition pointer;
 	ulong column_idx = 0, key_idx = 0;
 	char *column = NULL, *key = NULL, *keyval = NULL;
-	int column_len = 0, key_len = 0, keyval_idx = -1;
+	int column_len = 0, key_len = 0, keyval_len = 0, keyval_idx = -1;
+	zend_bool zcolumn_copied = 0, zkey_copied = 0, zkeyval_copied = 0;
 	
 	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "az|z", &zarray, &zcolumn, &zkey) == FAILURE) {
 		return;
@@ -2552,11 +2553,12 @@ PHP_FUNCTION(array_column)
 			column_len = Z_STRLEN_P(zcolumn);
 			break;
 		case IS_OBJECT:
-			MAKE_STD_ZVAL(zcolumn_copy);
-			ZVAL_ZVAL(zcolumn_copy, zcolumn, 1, 0);
-			convert_to_string(zcolumn_copy);
-			column = Z_STRVAL_P(zcolumn_copy);
-			column_len = Z_STRLEN_P(zcolumn_copy);
+			zcolumn_copy = *zcolumn;
+			zval_copy_ctor(&zcolumn_copy);
+			zcolumn_copied = 1;
+			convert_to_string(&zcolumn_copy);
+			column = Z_STRVAL(zcolumn_copy);
+			column_len = Z_STRLEN(zcolumn_copy);
 			break;
 		default:
 			php_error_docref(NULL TSRMLS_CC, E_WARNING, "The column key should be either a string or an integer");
@@ -2576,11 +2578,12 @@ PHP_FUNCTION(array_column)
 				key_len = Z_STRLEN_P(zkey);
 				break;
 			case IS_OBJECT:
-				MAKE_STD_ZVAL(zkey_copy);
-				ZVAL_ZVAL(zkey_copy, zkey, 1, 0);
-				convert_to_string(zkey_copy);
-				key = Z_STRVAL_P(zkey_copy);
-				key_len = Z_STRLEN_P(zkey_copy);
+				zkey_copy = *zkey;
+				zval_copy_ctor(&zkey_copy);
+				zkey_copied = 1;
+				convert_to_string(&zkey_copy);
+				key = Z_STRVAL(zkey_copy);
+				key_len = Z_STRLEN(zkey_copy);
 				break;
 			default:
 				php_error_docref(NULL TSRMLS_CC, E_WARNING, "The index key should be either a string or an integer");
@@ -2619,16 +2622,18 @@ PHP_FUNCTION(array_column)
 							break;
 						case IS_STRING:
 							keyval = Z_STRVAL_PP(zkeyval);
+							keyval_len = Z_STRLEN_PP(zkeyval);
 							break;
 						case IS_OBJECT:
-							if (!zkeyval_copy) {
-								MAKE_STD_ZVAL(zkeyval_copy);
-							} else {
-								zval_dtor(zkeyval_copy);
+							if (zkeyval_copied) {
+								zval_dtor(&zkeyval_copy);
 							}
-							ZVAL_ZVAL(zkeyval_copy, *zkeyval, 1, 0)
-							convert_to_string(zkeyval_copy);
-							keyval = Z_STRVAL_P(zkeyval_copy);
+							zkeyval_copy = **zkeyval;
+							zval_copy_ctor(&zkeyval_copy);
+							zkeyval_copied = 1;
+							convert_to_string(&zkeyval_copy);
+							keyval = Z_STRVAL(zkeyval_copy);
+							keyval_len = Z_STRLEN(zkeyval_copy);
 							break;
 						default:
 							keyval_idx = -1;
@@ -2637,7 +2642,7 @@ PHP_FUNCTION(array_column)
 			}
 
 			if (keyval) {
-				add_assoc_zval(return_value, keyval, *zcolval);
+				add_assoc_zval_ex(return_value, keyval, keyval_len, *zcolval);
 			} else if (keyval_idx != -1) {
 				add_index_zval(return_value, keyval_idx, *zcolval);
 			} else {
@@ -2646,17 +2651,14 @@ PHP_FUNCTION(array_column)
 		}
 
 	}
-	if (zcolumn_copy) {
-		zval_dtor(zcolumn_copy);
-		FREE_ZVAL(zcolumn_copy);
+	if (zcolumn_copied) {
+		zval_dtor(&zcolumn_copy);
 	}
-	if (zkey_copy) {
-		zval_dtor(zkey_copy);
-		FREE_ZVAL(zkey_copy);
+	if (zkey_copied) {
+		zval_dtor(&zkey_copy);
 	}
-	if (zkeyval_copy) {
-		zval_dtor(zkeyval_copy);
-		FREE_ZVAL(zkeyval_copy);
+	if (zkeyval_copied) {
+		zval_dtor(&zkeyval_copy);
 	}
 }
 /* }}} */
