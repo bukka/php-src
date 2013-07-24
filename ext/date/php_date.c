@@ -2195,16 +2195,22 @@ static HashTable *date_object_get_properties(zval *object TSRMLS_DC)
 		return props;
 	}
 
+	if (!dateobj->props) {
+		ALLOC_HASHTABLE(dateobj->props);
+		ZEND_INIT_SYMTABLE_EX(dateobj->props, 3, 0);
+	}
+	zend_hash_merge(dateobj->props, props, (copy_ctor_func_t) zval_add_ref, NULL, sizeof(zval *), 0);
+
 	/* first we add the date and time in ISO format */
 	MAKE_STD_ZVAL(zv);
 	ZVAL_STRING(zv, date_format("Y-m-d H:i:s", 12, dateobj->time, 1), 0);
-	zend_hash_update(props, "date", 5, &zv, sizeof(zval), NULL);
+	zend_hash_update(dateobj->props, "date", sizeof("date"), &zv, sizeof(zval), NULL);
 
 	/* then we add the timezone name (or similar) */
 	if (dateobj->time->is_localtime) {
 		MAKE_STD_ZVAL(zv);
 		ZVAL_LONG(zv, dateobj->time->zone_type);
-		zend_hash_update(props, "timezone_type", 14, &zv, sizeof(zval), NULL);
+		zend_hash_update(dateobj->props, "timezone_type", sizeof("timezone_type"), &zv, sizeof(zval), NULL);
 
 		MAKE_STD_ZVAL(zv);
 		switch (dateobj->time->zone_type) {
@@ -2227,10 +2233,10 @@ static HashTable *date_object_get_properties(zval *object TSRMLS_DC)
 				ZVAL_STRING(zv, dateobj->time->tz_abbr, 1);
 				break;
 		}
-		zend_hash_update(props, "timezone", 9, &zv, sizeof(zval), NULL);
+		zend_hash_update(dateobj->props, "timezone", sizeof("timezone"), &zv, sizeof(zval), NULL);
 	}
 
-	return props;
+	return dateobj->props;
 }
 
 static inline zend_object_value date_object_new_timezone_ex(zend_class_entry *class_type, php_timezone_obj **ptr TSRMLS_DC)
@@ -2464,6 +2470,10 @@ static void date_object_free_storage_date(void *object TSRMLS_DC)
 
 	if (intern->time) {
 		timelib_time_dtor(intern->time);
+	}
+	if (intern->props) {
+		zend_hash_destroy(intern->props);
+		FREE_HASHTABLE(intern->props);
 	}
 
 	zend_object_std_dtor(&intern->std TSRMLS_CC);
