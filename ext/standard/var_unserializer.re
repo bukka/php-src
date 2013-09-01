@@ -358,7 +358,7 @@ static inline int object_custom(UNSERIALIZE_PARAMETER, zend_class_entry *ce)
 	if (ce->unserialize == NULL) {
 		zend_error(E_WARNING, "Class %s has no unserializer", ce->name);
 		object_init_ex(*rval, ce);
-	} else if (ce->unserialize(rval, ce, (const unsigned char*)*p, datalen, (zend_unserialize_data *)var_hash TSRMLS_CC) != SUCCESS) {
+	} else if (ce->unserialize(rval, ce, (const unsigned char*)*p, datalen, (zend_unserialize_data *)var_hash TSRMLS_CC) < 0) {
 		return 0;
 	}
 
@@ -772,6 +772,16 @@ object ":" uiv ":" ["]	{
 		php_store_class_name(*rval, class_name, len2);
 	}
 	efree(class_name);
+
+	/* custom unserialization for non-custom objects */
+	if (ce->unserialize) {
+		int ret = ce->unserialize(rval, ce, (const unsigned char*)*p, elements, (zend_unserialize_data *)var_hash TSRMLS_CC);
+		if (ret < 0) {
+			return 0;
+		}
+		(*p) += ret;
+		return finish_nested_data(UNSERIALIZE_PASSTHRU);
+	}
 
 	return object_common2(UNSERIALIZE_PASSTHRU, elements);
 }
