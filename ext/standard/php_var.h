@@ -88,8 +88,14 @@ struct php_unserialize_data {
 
 typedef struct php_unserialize_data* php_unserialize_data_t;
 
+/* unserialize variable */
 PHPAPI int php_var_unserialize(zval **rval, const unsigned char **p, const unsigned char *max, php_unserialize_data_t *var_hash TSRMLS_DC);
 
+/* unserialize one property (key and value) of the serialized object */
+PHPAPI int php_var_unserialize_property(zval *key, zval *value, const unsigned char **buf, zend_uint *buf_len, zend_unserialize_data *data TSRMLS_DC);
+
+/* unserialize all properties of the serialized object and save them to ht */
+PHPAPI int php_var_unserialize_properties(HashTable *ht, const unsigned char **buf, zend_uint *buf_len, zend_uint elements, zend_unserialize_data *data TSRMLS_DC);
 
 
 #define PHP_VAR_SERIALIZE_INIT(var_hash_ptr) \

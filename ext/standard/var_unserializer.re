@@ -415,6 +415,73 @@ static inline int object_common2(UNSERIALIZE_PARAMETER, long elements)
 # pragma optimize("", on)
 #endif
 
+PHPAPI int php_var_unserialize_property(zval *key, zval *value, const unsigned char **buf, zend_uint *buf_len, zend_unserialize_data *data TSRMLS_DC)
+{
+	const unsigned char *max;
+
+	max = *buf + *buf_len;
+
+	if (!php_var_unserialize(&key, buf, max, NULL TSRMLS_CC) || Z_TYPE_P(key) != IS_STRING) {
+		zval_dtor(key);
+		return 0;
+	}
+	if (!php_var_unserialize(&value, buf, max, (php_unserialize_data_t *) data TSRMLS_CC)) {
+		zval_dtor(key);
+		zval_dtor(value);
+		return 0;
+	}
+	*buf_len = max - *buf;
+	return 1;
+}
+
+PHPAPI int php_var_unserialize_properties(HashTable *ht, const unsigned char **buf, zend_uint *buf_len, zend_uint elements, zend_unserialize_data *data TSRMLS_DC)
+{
+	const unsigned char *max;
+
+	max = *buf + *buf_len;
+
+	while (elements-- > 0) {
+		zval *key, *value;
+
+		ALLOC_INIT_ZVAL(key);
+
+		if (!php_var_unserialize(&key, buf, max, NULL TSRMLS_CC)) {
+			zval_dtor(key);
+			FREE_ZVAL(key);
+			return 0;
+		}
+
+		if (Z_TYPE_P(key) != IS_LONG && Z_TYPE_P(key) != IS_STRING) {
+			zval_dtor(key);
+			FREE_ZVAL(key);
+			return 0;
+		}
+
+		ALLOC_INIT_ZVAL(value);
+
+		if (!php_var_unserialize(&value, buf, max, (php_unserialize_data_t *) data TSRMLS_CC)) {
+			zval_dtor(key);
+			FREE_ZVAL(key);
+			zval_dtor(value);
+			FREE_ZVAL(value);
+			return 0;
+		}
+
+		zend_hash_update(ht, Z_STRVAL_P(key), Z_STRLEN_P(key) + 1, &value, sizeof value, NULL);
+
+		zval_dtor(key);
+		FREE_ZVAL(key);
+
+		if (elements && *(*buf-1) != ';' && *(*buf-1) != '}') {
+			(*buf)--;
+			return 0;
+		}
+	}
+
+	*buf_len = max - *buf;
+	return 1;
+}
+
 PHPAPI int php_var_unserialize(UNSERIALIZE_PARAMETER)
 {
 	const unsigned char *cursor, *limit, *marker, *start;
@@ -773,13 +840,14 @@ object ":" uiv ":" ["]	{
 	}
 	efree(class_name);
 
-	/* custom unserialization for non-custom objects */
+	/* custom unserialization for objects that are not custom (C: prefix) */
 	if (ce->unserialize) {
-		int ret = ce->unserialize(rval, ce, (const unsigned char*)*p, elements, (zend_unserialize_data *)var_hash TSRMLS_CC);
+		int ret = ce->unserialize(rval, ce, (const unsigned char*)*p, max - *p, (zend_unserialize_data *)var_hash TSRMLS_CC);
 		if (ret < 0) {
 			return 0;
 		}
-		(*p) += ret;
+		/* In this case the return value from unserialize callback is the number of character left in the buffer */
+		(*p) = max - ret;
 		return finish_nested_data(UNSERIALIZE_PASSTHRU);
 	}
 
