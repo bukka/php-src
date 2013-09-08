@@ -58,7 +58,7 @@ PHPAPI void php_var_serialize_object_end(smart_str *buf);
 PHPAPI void php_var_serialize_property_null(smart_str *buf, const char *key);
 
 /* append boolean property */
-PHPAPI void php_var_serialize_property_bool(smart_str *buf, const char *key, long value);
+PHPAPI void php_var_serialize_property_bool(smart_str *buf, const char *key, int value);
 
 /* append long property */
 PHPAPI void php_var_serialize_property_long(smart_str *buf, const char *key, long value);

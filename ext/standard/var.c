@@ -960,10 +960,10 @@ PHPAPI void php_var_serialize_property_null(smart_str *buf, const char *key) /* 
 }
 /* }}} */
 
-PHPAPI void php_var_serialize_property_bool(smart_str *buf, const char *key, long value) /* {{{ */
+PHPAPI void php_var_serialize_property_bool(smart_str *buf, const char *key, int value) /* {{{ */
 {
 	php_var_serialize_string(buf, key, strlen(key));
-	php_var_serialize_bool(buf, value);
+	php_var_serialize_bool(buf, (long) value);
 }
 /* }}} */
 
