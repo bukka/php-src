@@ -995,16 +995,16 @@ PHPAPI void php_var_serialize_property_stringl(smart_str *buf, const char *key, 
 }
 /* }}} */
 
-PHPAPI void php_var_serialize_property_zval(smart_str *buf, const char *key, zval *value, php_serialize_data_t var_hash TSRMLS_DC) /* {{{ */
+PHPAPI void php_var_serialize_property_zval(smart_str *buf, const char *key, zval *value, zend_serialize_data *data TSRMLS_DC) /* {{{ */
 {
 	php_var_serialize_string(buf, key, strlen(key));
-	php_var_serialize_intern(buf, value, var_hash TSRMLS_CC);
+	php_var_serialize_intern(buf, value, (HashTable *) data TSRMLS_CC);
 }
 /* }}} */
 
-PHPAPI void php_var_serialize_properties(smart_str *buf, HashTable *properties, php_serialize_data_t var_hash TSRMLS_DC) /* {{{ */
+PHPAPI void php_var_serialize_properties(smart_str *buf, HashTable *properties, zend_serialize_data *data TSRMLS_DC) /* {{{ */
 {
-	php_var_serialize_hash_table(buf, properties, NULL, 0, var_hash TSRMLS_CC);
+	php_var_serialize_hash_table(buf, properties, NULL, 0, (HashTable *) data TSRMLS_CC);
 }
 /* }}} */
 

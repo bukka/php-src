@@ -73,10 +73,10 @@ PHPAPI void php_var_serialize_property_string(smart_str *buf, const char *key, c
 PHPAPI void php_var_serialize_property_stringl(smart_str *buf, const char *key, const char *value, int value_len);
 
 /* append string property zval */
-PHPAPI void php_var_serialize_property_zval(smart_str *buf, const char *key, zval *value, php_serialize_data_t var_hash TSRMLS_DC);
+PHPAPI void php_var_serialize_property_zval(smart_str *buf, const char *key, zval *value, zend_serialize_data *data TSRMLS_DC);
 
 /* append properties taken from HashTable */
-PHPAPI void php_var_serialize_properties(smart_str *buf, HashTable *properties, php_serialize_data_t var_hash TSRMLS_DC);
+PHPAPI void php_var_serialize_properties(smart_str *buf, HashTable *properties, zend_serialize_data *data TSRMLS_DC);
 
 
 struct php_unserialize_data {
