@@ -21,6 +21,7 @@
 #include "php.h"
 #include "ext/standard/php_var.h"
 #include "php_incomplete_class.h"
+#include "zend_interfaces.h"
 
 /* {{{ reference-handling for unserializer: var_* */
 #define VAR_ENTRIES_MAX 1024
@@ -593,11 +594,11 @@ PHPAPI int php_var_unserialize(UNSERIALIZE_PARAMETER)
 	*p = YYCURSOR;
 	INIT_PZVAL(*rval);
 
-	if (!strncmp(start + 2, "NAN", 3)) {
+	if (!strncmp((const char *) (start + 2), "NAN", 3)) {
 		ZVAL_DOUBLE(*rval, php_get_nan());
-	} else if (!strncmp(start + 2, "INF", 3)) {
+	} else if (!strncmp((const char *) (start + 2), "INF", 3)) {
 		ZVAL_DOUBLE(*rval, php_get_inf());
-	} else if (!strncmp(start + 2, "-INF", 4)) {
+	} else if (!strncmp((const char *) (start + 2), "-INF", 4)) {
 		ZVAL_DOUBLE(*rval, -php_get_inf());
 	}
 
@@ -841,7 +842,7 @@ object ":" uiv ":" ["]	{
 	efree(class_name);
 
 	/* custom unserialization for objects that are not custom (C: prefix) */
-	if (ce->unserialize) {
+	if (ce->unserialize && ce->unserialize != zend_user_unserialize) {
 		int ret = ce->unserialize(rval, ce, (const unsigned char*)*p, max - *p, (zend_unserialize_data *)var_hash TSRMLS_CC);
 		if (ret < 0) {
 			return 0;
