@@ -2181,30 +2181,30 @@ static HashTable *date_object_get_gc_timezone(zval *object, zval ***table, int *
 
 static HashTable *date_object_get_debug_info(zval *object, int *is_temp TSRMLS_DC)
 {
-	HashTable *props;
-	zval *zv;
+	HashTable *debug_props, *object_props;
+	zval *zv, *tmp;
 	php_date_obj *dateobj;
 
 	dateobj = (php_date_obj *) zend_object_store_get_object(object TSRMLS_CC);
 
-	ALLOC_HASHTABLE(props);
-	zend_hash_init(props, 3, NULL, ZVAL_PTR_DTOR, 0);
+	ALLOC_HASHTABLE(debug_props);
+	zend_hash_init(debug_props, 3, NULL, ZVAL_PTR_DTOR, 0);
 	*is_temp = 1;
 
 	if (!dateobj->time || GC_G(gc_active)) {
-		return props;
+		return debug_props;
 	}
 
 	/* first we add the date and time in ISO format */
 	MAKE_STD_ZVAL(zv);
 	ZVAL_STRING(zv, date_format("Y-m-d H:i:s", sizeof("Y-m-d H:i:s"), dateobj->time, 1), 0);
-	zend_hash_update(props, "date", sizeof("date"), &zv, sizeof(zv), NULL);
+	zend_hash_update(debug_props, "date", sizeof("date"), &zv, sizeof(zv), NULL);
 
 	/* then we add the timezone name (or similar) */
 	if (dateobj->time->is_localtime) {
 		MAKE_STD_ZVAL(zv);
 		ZVAL_LONG(zv, dateobj->time->zone_type);
-		zend_hash_update(props, "timezone_type", sizeof("timezone_type"), &zv, sizeof(zv), NULL);
+		zend_hash_update(debug_props, "timezone_type", sizeof("timezone_type"), &zv, sizeof(zv), NULL);
 
 		MAKE_STD_ZVAL(zv);
 		switch (dateobj->time->zone_type) {
@@ -2227,28 +2227,39 @@ static HashTable *date_object_get_debug_info(zval *object, int *is_temp TSRMLS_D
 				ZVAL_STRING(zv, dateobj->time->tz_abbr, 1);
 				break;
 		}
-		zend_hash_update(props, "timezone", 9, &zv, sizeof(zv), NULL);
+		zend_hash_update(debug_props, "timezone", sizeof("timezone"), &zv, sizeof(zv), NULL);
 	}
 
-	return props;
+	/* merge debug props with object props */
+	object_props = zend_std_get_properties(object TSRMLS_CC);
+	zend_hash_merge(debug_props, object_props, (void (*)(void *pData)) zval_add_ref, (void *) &tmp, sizeof(zval *), 0);
+
+	return debug_props;
 }
 
 static int date_object_serialize(zval *object, unsigned char **buffer, zend_uint *buf_len, zend_serialize_data *data TSRMLS_DC)
 {
+	HashTable *object_props;
+	int object_props_num;
 	char *format;
 	php_date_obj *dateobj = (php_date_obj *) zend_object_store_get_object(object TSRMLS_CC);
 	smart_str buf = {0};
 
+	object_props = zend_std_get_properties(object TSRMLS_CC);
+	object_props_num = zend_hash_num_elements(object_props);
+
 	if (!dateobj->time) {
-		php_var_serialize_object_start(&buf, object, 0 TSRMLS_CC);
-		php_var_serialize_object_end(&buf);
+		php_var_serialize_object_start(&buf, object, object_props_num TSRMLS_CC);
 		goto date_serialize_end;
 	}
 
+	php_var_serialize_object_start(&buf, object, (object_props_num + (dateobj->time->is_localtime ? 3 : 1)) TSRMLS_CC);
+
 	format = date_format("Y-m-d H:i:s", sizeof("Y-m-d H:i:s"), dateobj->time, 1);
+	php_var_serialize_property_string(&buf, "date", format);
+	efree(format);
+
 	if (dateobj->time->is_localtime) {
-		php_var_serialize_object_start(&buf, object, 3 TSRMLS_CC);
-		php_var_serialize_property_string(&buf, "date", format);
 		php_var_serialize_property_long(&buf, "timezone_type", dateobj->time->zone_type);
 		switch (dateobj->time->zone_type) {
 			case TIMELIB_ZONETYPE_ID:
@@ -2271,15 +2282,13 @@ static int date_object_serialize(zval *object, unsigned char **buffer, zend_uint
 				php_var_serialize_property_string(&buf, "timezone", dateobj->time->tz_abbr);
 				break;
 		}
-		php_var_serialize_object_end(&buf);
-	} else {
-		php_var_serialize_object_start(&buf, object, 1 TSRMLS_CC);
-		php_var_serialize_property_string(&buf, "date", format);
-		php_var_serialize_object_end(&buf);
 	}
-	efree(format);
 
 date_serialize_end:
+	if (object_props_num > 0) {
+		php_var_serialize_properties(&buf, object_props, data TSRMLS_CC);
+	}
+	php_var_serialize_object_end(&buf);
 	smart_str_0(&buf);
 	*buffer = (unsigned char *) buf.c;
 	*buf_len = buf.len;
