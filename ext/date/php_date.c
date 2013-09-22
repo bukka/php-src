@@ -626,6 +626,7 @@ static zend_object_value date_object_clone_period(zval *this_ptr TSRMLS_DC);
 
 static int date_object_serialize(zval *object, unsigned char **buffer, zend_uint *buf_len, zend_serialize_data *data TSRMLS_DC);
 
+static void date_object_write_property(zval *object, zval *member, zval *value, const zend_literal *key TSRMLS_DC);
 static int date_object_compare_date(zval *d1, zval *d2 TSRMLS_DC);
 static HashTable *date_object_get_gc(zval *object, zval ***table, int *n TSRMLS_DC);
 static HashTable *date_object_get_debug_info(zval *object, int *is_temp TSRMLS_DC);
@@ -1995,6 +1996,7 @@ static void date_register_classes(TSRMLS_D)
 	ce_date.serialize = date_object_serialize;
 	date_ce_date = zend_register_internal_class_ex(&ce_date, NULL, NULL TSRMLS_CC);
 	memcpy(&date_object_handlers_date, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
+	date_object_handlers_date.write_property = date_object_write_property;
 	date_object_handlers_date.clone_obj = date_object_clone_date;
 	date_object_handlers_date.compare_objects = date_object_compare_date;
 	date_object_handlers_date.get_debug_info = date_object_get_debug_info;
@@ -2144,6 +2146,19 @@ static zval* date_clone_immutable(zval *object TSRMLS_DC)
 
 	return new_object;
 }
+
+static void date_object_write_property(zval *object, zval *member, zval *value, const zend_literal *key TSRMLS_DC)
+{
+	if (Z_TYPE_P(member) == IS_STRING &&
+			(!strcmp(Z_STRVAL_P(member), "date") ||
+			 !strcmp(Z_STRVAL_P(member), "timezone") ||
+			 !strcmp(Z_STRVAL_P(member), "timezone_type"))) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Redefining internal property '%s' is not allowed", Z_STRVAL_P(member));
+		return;
+	}
+	zend_std_write_property(object, member, value, key TSRMLS_CC);
+}
+
 
 static int date_object_compare_date(zval *d1, zval *d2 TSRMLS_DC)
 {
