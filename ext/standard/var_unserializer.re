@@ -441,32 +441,18 @@ static inline int object_common2(UNSERIALIZE_PARAMETER, long elements)
 # pragma optimize("", on)
 #endif
 
-PHPAPI int php_var_unserialize_property(zval *key, zval *value, const unsigned char **buf, zend_uint *buf_len, zend_unserialize_data *data TSRMLS_DC)
+PHPAPI int php_var_unserialize_has_properties(const unsigned char *buf, zend_uint buf_len)
 {
-	const unsigned char *max;
-
-	max = *buf + *buf_len;
-
-	if (!php_var_unserialize(&key, buf, max, NULL TSRMLS_CC) || Z_TYPE_P(key) != IS_STRING) {
-		zval_dtor(key);
-		return 0;
-	}
-	if (!php_var_unserialize(&value, buf, max, (php_unserialize_data_t *) data TSRMLS_CC)) {
-		zval_dtor(key);
-		zval_dtor(value);
-		return 0;
-	}
-	*buf_len = max - *buf;
-	return 1;
+	return buf_len && *buf != '}';
 }
 
-PHPAPI int php_var_unserialize_properties(HashTable *ht, const unsigned char **buf, zend_uint *buf_len, zend_uint elements, zend_unserialize_data *data TSRMLS_DC)
+PHPAPI int php_var_unserialize_properties(HashTable *ht, const unsigned char **buf, zend_uint *buf_len, zend_unserialize_data *data TSRMLS_DC)
 {
 	const unsigned char *max;
 
 	max = *buf + *buf_len;
 
-	while (elements-- > 0) {
+	while (php_var_unserialize_has_properties(*buf, *buf_len)) {
 		zval *key, *value;
 
 		ALLOC_INIT_ZVAL(key);
@@ -498,12 +484,31 @@ PHPAPI int php_var_unserialize_properties(HashTable *ht, const unsigned char **b
 		zval_dtor(key);
 		FREE_ZVAL(key);
 
-		if (elements && *(*buf-1) != ';' && *(*buf-1) != '}') {
+		if (php_var_unserialize_has_properties(*buf, *buf_len) && *(*buf-1) != ';' && *(*buf-1) != '}') {
 			(*buf)--;
 			return 0;
 		}
 	}
 
+	*buf_len = max - *buf;
+	return 1;
+}
+
+PHPAPI int php_var_unserialize_property(zval *key, zval *value, const unsigned char **buf, zend_uint *buf_len, zend_unserialize_data *data TSRMLS_DC)
+{
+	const unsigned char *max;
+
+	max = *buf + *buf_len;
+
+	if (!php_var_unserialize(&key, buf, max, NULL TSRMLS_CC) || Z_TYPE_P(key) != IS_STRING) {
+		zval_dtor(key);
+		return 0;
+	}
+	if (!php_var_unserialize(&value, buf, max, (php_unserialize_data_t *) data TSRMLS_CC)) {
+		zval_dtor(key);
+		zval_dtor(value);
+		return 0;
+	}
 	*buf_len = max - *buf;
 	return 1;
 }
