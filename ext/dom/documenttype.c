@@ -216,7 +216,11 @@ int dom_documenttype_internal_subset_read(dom_object *obj, zval **retval TSRMLS_
 		if (buff != NULL) {
 			xmlNodeDumpOutput (buff, NULL, (xmlNodePtr) intsubset, 0, 0, NULL);
 			xmlOutputBufferFlush(buff);
+#ifdef LIBXML2_NEW_BUFFER
+			strintsubset = xmlStrndup(xmlOutputBufferGetContent(buff), xmlOutputBufferGetSize(buff));
+#else
 			strintsubset = xmlStrndup(buff->buffer->content, buff->buffer->use);
+#endif
 			(void)xmlOutputBufferClose(buff);
 			ZVAL_STRING(*retval, (char *) strintsubset, 1);
 			return SUCCESS;
