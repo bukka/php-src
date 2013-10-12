@@ -1737,7 +1737,6 @@ void zend_do_begin_function_declaration(znode *function_token, znode *function_n
 		zend_op dummy_opline;
 
 		dummy_opline.result_type = IS_UNUSED;
-		dummy_opline.op1_type = IS_UNUSED;
 
 		zend_stack_push(&CG(foreach_copy_stack), (void *) &dummy_opline, sizeof(zend_op));
 	}
@@ -1822,7 +1821,7 @@ void zend_do_end_function_declaration(const znode *function_token TSRMLS_DC) /* 
 }
 /* }}} */
 
-void zend_do_receive_arg(zend_uchar op, znode *varname, const znode *offset, const znode *initialization, znode *class_type, zend_uchar pass_by_reference TSRMLS_DC) /* {{{ */
+void zend_do_receive_param(zend_uchar op, znode *varname, const znode *initialization, znode *class_type, zend_uchar pass_by_reference, zend_bool is_variadic TSRMLS_DC) /* {{{ */
 {
 	zend_op *opline;
 	zend_arg_info *cur_arg_info;
@@ -1846,24 +1845,41 @@ void zend_do_receive_arg(zend_uchar op, znode *varname, const znode *offset, con
 		}
 	}
 
+	if (CG(active_op_array)->fn_flags & ZEND_ACC_VARIADIC) {
+		zend_error(E_COMPILE_ERROR, "Only the last parameter can be variadic");
+	}
+
+	if (is_variadic) {
+		if (op == ZEND_RECV_INIT) {
+			zend_error(E_COMPILE_ERROR, "Variadic parameter cannot have a default value");
+		}
+
+		op = ZEND_RECV_VARIADIC;
+		CG(active_op_array)->fn_flags |= ZEND_ACC_VARIADIC;
+	}
+
 	opline = get_next_op(CG(active_op_array) TSRMLS_CC);
 	CG(active_op_array)->num_args++;
 	opline->opcode = op;
 	SET_NODE(opline->result, &var);
-	SET_NODE(opline->op1, offset);
+	opline->op1_type = IS_UNUSED;
+	opline->op1.num = CG(active_op_array)->num_args;
 	if (op == ZEND_RECV_INIT) {
 		SET_NODE(opline->op2, initialization);
 	} else {
-		CG(active_op_array)->required_num_args = CG(active_op_array)->num_args;
 		SET_UNUSED(opline->op2);
+		if (!is_variadic) {
+			CG(active_op_array)->required_num_args = CG(active_op_array)->num_args;
+		}
 	}
 	CG(active_op_array)->arg_info = erealloc(CG(active_op_array)->arg_info, sizeof(zend_arg_info)*(CG(active_op_array)->num_args));
 	cur_arg_info = &CG(active_op_array)->arg_info[CG(active_op_array)->num_args-1];
 	cur_arg_info->name = zend_new_interned_string(estrndup(Z_STRVAL(varname->u.constant), Z_STRLEN(varname->u.constant)), Z_STRLEN(varname->u.constant) + 1, 1 TSRMLS_CC);
 	cur_arg_info->name_len = Z_STRLEN(varname->u.constant);
 	cur_arg_info->type_hint = 0;
-	cur_arg_info->allow_null = 1;
 	cur_arg_info->pass_by_reference = pass_by_reference;
+	cur_arg_info->allow_null = 1;
+	cur_arg_info->is_variadic = is_variadic;
 	cur_arg_info->class_name = NULL;
 	cur_arg_info->class_name_len = 0;
 
@@ -2630,7 +2646,7 @@ static int generate_free_switch_expr(const zend_switch_entry *switch_entry TSRML
 	opline->opcode = (switch_entry->cond.op_type == IS_TMP_VAR) ? ZEND_FREE : ZEND_SWITCH_FREE;
 	SET_NODE(opline->op1, &switch_entry->cond);
 	SET_UNUSED(opline->op2);
-	opline->extended_value = 0;
+
 	return 0;
 }
 /* }}} */
@@ -2640,7 +2656,7 @@ static int generate_free_foreach_copy(const zend_op *foreach_copy TSRMLS_DC) /* 
 	zend_op *opline;
 
 	/* If we reach the separator then stop applying the stack */
-	if (foreach_copy->result_type == IS_UNUSED && foreach_copy->op1_type == IS_UNUSED) {
+	if (foreach_copy->result_type == IS_UNUSED) {
 		return 1;
 	}
 
@@ -2649,16 +2665,6 @@ static int generate_free_foreach_copy(const zend_op *foreach_copy TSRMLS_DC) /* 
 	opline->opcode = (foreach_copy->result_type == IS_TMP_VAR) ? ZEND_FREE : ZEND_SWITCH_FREE;
 	COPY_NODE(opline->op1, foreach_copy->result);
 	SET_UNUSED(opline->op2);
-	opline->extended_value = 1;
-
-	if (foreach_copy->op1_type != IS_UNUSED) {
-		opline = get_next_op(CG(active_op_array) TSRMLS_CC);
-
-		opline->opcode = (foreach_copy->op1_type == IS_TMP_VAR) ? ZEND_FREE : ZEND_SWITCH_FREE;
-		COPY_NODE(opline->op1, foreach_copy->op1);
-		SET_UNUSED(opline->op2);
-		opline->extended_value = 0;
-	}
 
 	return 0;
 }
@@ -3083,7 +3089,7 @@ static void do_inherit_method(zend_function *function) /* {{{ */
 
 static zend_bool zend_do_perform_implementation_check(const zend_function *fe, const zend_function *proto TSRMLS_DC) /* {{{ */
 {
-	zend_uint i;
+	zend_uint i, num_args;
 
 	/* If it's a user function then arg_info == NULL means we don't have any parameters but
 	 * we still need to do the arg number checks.  We are only willing to ignore this for internal
@@ -3113,48 +3119,66 @@ static zend_bool zend_do_perform_implementation_check(const zend_function *fe, c
 		return 0;
 	}
 
-	if (fe->common.type != ZEND_USER_FUNCTION
-		&& (proto->common.fn_flags & ZEND_ACC_PASS_REST_BY_REFERENCE) != 0
-		&& (fe->common.fn_flags & ZEND_ACC_PASS_REST_BY_REFERENCE) == 0) {
-		return 0;
-	}
-
 	/* by-ref constraints on return values are covariant */
 	if ((proto->common.fn_flags & ZEND_ACC_RETURN_REFERENCE)
 		&& !(fe->common.fn_flags & ZEND_ACC_RETURN_REFERENCE)) {
 		return 0;
 	}
 
-	for (i=0; i < proto->common.num_args; i++) {
-		if (ZEND_LOG_XOR(fe->common.arg_info[i].class_name, proto->common.arg_info[i].class_name)) {
+	if ((proto->common.fn_flags & ZEND_ACC_VARIADIC)
+		&& !(fe->common.fn_flags & ZEND_ACC_VARIADIC)) {
+		return 0;
+	}
+
+	/* For variadic functions any additional (optional) arguments that were added must be
+	 * checked against the signature of the variadic argument, so in this case we have to
+	 * go through all the parameters of the function and not just those present in the
+	 * prototype. */
+	num_args = proto->common.num_args;
+	if ((fe->common.fn_flags & ZEND_ACC_VARIADIC)
+		&& fe->common.num_args > proto->common.num_args) {
+		num_args = fe->common.num_args;
+	}
+
+	for (i = 0; i < num_args; i++) {
+		zend_arg_info *fe_arg_info = &fe->common.arg_info[i];
+
+		zend_arg_info *proto_arg_info;
+		if (i < proto->common.num_args) {
+			proto_arg_info = &proto->common.arg_info[i];
+		} else {
+			proto_arg_info = &proto->common.arg_info[proto->common.num_args-1];
+		}
+
+		if (ZEND_LOG_XOR(fe_arg_info->class_name, proto_arg_info->class_name)) {
 			/* Only one has a type hint and the other one doesn't */
 			return 0;
 		}
 
-		if (fe->common.arg_info[i].class_name) {
+		if (fe_arg_info->class_name) {
 			const char *fe_class_name, *proto_class_name;
 			zend_uint fe_class_name_len, proto_class_name_len;
 
-			if (!strcasecmp(fe->common.arg_info[i].class_name, "parent") && proto->common.scope) {
+			if (!strcasecmp(fe_arg_info->class_name, "parent") && proto->common.scope) {
 				fe_class_name = proto->common.scope->name;
 				fe_class_name_len = proto->common.scope->name_length;
-			} else if (!strcasecmp(fe->common.arg_info[i].class_name, "self") && fe->common.scope) {
+			} else if (!strcasecmp(fe_arg_info->class_name, "self") && fe->common.scope) {
 				fe_class_name = fe->common.scope->name;
 				fe_class_name_len = fe->common.scope->name_length;
 			} else {
-				fe_class_name = fe->common.arg_info[i].class_name;
-				fe_class_name_len = fe->common.arg_info[i].class_name_len;
+				fe_class_name = fe_arg_info->class_name;
+				fe_class_name_len = fe_arg_info->class_name_len;
 			}
 
-			if (!strcasecmp(proto->common.arg_info[i].class_name, "parent") && proto->common.scope && proto->common.scope->parent) {
+			if (!strcasecmp(proto_arg_info->class_name, "parent") && proto->common.scope && proto->common.scope->parent) {
 				proto_class_name = proto->common.scope->parent->name;
 				proto_class_name_len = proto->common.scope->parent->name_length;
-			} else if (!strcasecmp(proto->common.arg_info[i].class_name, "self") && proto->common.scope) {
+			} else if (!strcasecmp(proto_arg_info->class_name, "self") && proto->common.scope) {
 				proto_class_name = proto->common.scope->name;
 				proto_class_name_len = proto->common.scope->name_length;
 			} else {
-				proto_class_name = proto->common.arg_info[i].class_name;
-				proto_class_name_len = proto->common.arg_info[i].class_name_len;
+				proto_class_name = proto_arg_info->class_name;
+				proto_class_name_len = proto_arg_info->class_name_len;
 			}
 
 			if (strcasecmp(fe_class_name, proto_class_name)!=0) {
@@ -3181,24 +3205,17 @@ static zend_bool zend_do_perform_implementation_check(const zend_function *fe, c
 				}
 			}
 		}
-		if (fe->common.arg_info[i].type_hint != proto->common.arg_info[i].type_hint) {
+		if (fe_arg_info->type_hint != proto_arg_info->type_hint) {
 			/* Incompatible type hint */
 			return 0;
 		}
 
 		/* by-ref constraints on arguments are invariant */
-		if (fe->common.arg_info[i].pass_by_reference != proto->common.arg_info[i].pass_by_reference) {
+		if (fe_arg_info->pass_by_reference != proto_arg_info->pass_by_reference) {
 			return 0;
 		}
 	}
 
-	if (proto->common.fn_flags & ZEND_ACC_PASS_REST_BY_REFERENCE) {
-		for (i=proto->common.num_args; i < fe->common.num_args; i++) {
-			if (!fe->common.arg_info[i].pass_by_reference) {
-				return 0;
-			}
-		}
-	}
 	return 1;
 }
 /* }}} */
@@ -3271,6 +3288,13 @@ static char * zend_get_function_declaration(zend_function *fptr TSRMLS_DC) /* {{
 			if (arg_info->pass_by_reference) {
 				*(offset++) = '&';
 			}
+
+			if (arg_info->is_variadic) {
+				*(offset++) = '.';
+				*(offset++) = '.';
+				*(offset++) = '.';
+			}
+
 			*(offset++) = '$';
 
 			if (arg_info->name) {
@@ -3286,7 +3310,7 @@ static char * zend_get_function_declaration(zend_function *fptr TSRMLS_DC) /* {{
 					idx /= 10;
 				} while (idx > 0);
 			}
-			if (i >= required) {
+			if (i >= required && !arg_info->is_variadic) {
 				*(offset++) = ' ';
 				*(offset++) = '=';
 				*(offset++) = ' ';
@@ -6190,7 +6214,6 @@ void zend_do_foreach_begin(znode *foreach_token, znode *open_brackets_token, zno
 {
 	zend_op *opline;
 	zend_bool is_variable;
-	zend_bool push_container = 0;
 	zend_op dummy_opline;
 
 	if (variable) {
@@ -6202,14 +6225,6 @@ void zend_do_foreach_begin(znode *foreach_token, znode *open_brackets_token, zno
 		/* save the location of FETCH_W instruction(s) */
 		open_brackets_token->u.op.opline_num = get_next_op_number(CG(active_op_array));
 		zend_do_end_variable_parse(array, BP_VAR_W, 0 TSRMLS_CC);
-		if (CG(active_op_array)->last > 0 &&
-		    CG(active_op_array)->opcodes[CG(active_op_array)->last-1].opcode == ZEND_FETCH_OBJ_W) {
-			/* Only lock the container if we are fetching from a real container and not $this */
-			if (CG(active_op_array)->opcodes[CG(active_op_array)->last-1].op1_type == IS_VAR) {
-				CG(active_op_array)->opcodes[CG(active_op_array)->last-1].extended_value |= ZEND_FETCH_ADD_LOCK;
-				push_container = 1;
-			}
-		}
 	} else {
 		is_variable = 0;
 		open_brackets_token->u.op.opline_num = get_next_op_number(CG(active_op_array));
@@ -6229,11 +6244,6 @@ void zend_do_foreach_begin(znode *foreach_token, znode *open_brackets_token, zno
 	opline->extended_value = is_variable ? ZEND_FE_RESET_VARIABLE : 0;
 
 	COPY_NODE(dummy_opline.result, opline->result);
-	if (push_container) {
-		COPY_NODE(dummy_opline.op1, CG(active_op_array)->opcodes[CG(active_op_array)->last-2].op1);
-	} else {
-		dummy_opline.op1_type = IS_UNUSED;
-	}
 	zend_stack_push(&CG(foreach_copy_stack), (void *) &dummy_opline, sizeof(zend_op));
 
 	/* save the location of FE_FETCH */
@@ -6290,7 +6300,6 @@ void zend_do_foreach_cont(znode *foreach_token, const znode *open_brackets_token
 		opline->extended_value |= ZEND_FE_FETCH_BYREF;
 		CG(active_op_array)->opcodes[foreach_token->u.op.opline_num].extended_value |= ZEND_FE_RESET_REFERENCE;
 	} else {
-		zend_op *foreach_copy;
 		zend_op *fetch = &CG(active_op_array)->opcodes[foreach_token->u.op.opline_num];
 		zend_op	*end = &CG(active_op_array)->opcodes[open_brackets_token->u.op.opline_num];
 
@@ -6307,9 +6316,6 @@ void zend_do_foreach_cont(znode *foreach_token, const znode *open_brackets_token
 				fetch->opcode -= 3; /* FETCH_W -> FETCH_R */
 			}
 		}
-		/* prevent double SWITCH_FREE */
-		zend_stack_top(&CG(foreach_copy_stack), (void **) &foreach_copy);
-		foreach_copy->op1_type = IS_UNUSED;
 	}
 
 	GET_NODE(&value_node, opline->result);
