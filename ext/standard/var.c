@@ -420,6 +420,7 @@ PHPAPI void php_var_export_ex(zval **struc, int level, smart_str *buf TSRMLS_DC)
 	int tmp_len, tmp_len2;
 	const char *class_name;
 	zend_uint class_name_len;
+	int is_temp;
 
 	switch (Z_TYPE_PP(struc)) {
 	case IS_BOOL:
@@ -473,7 +474,7 @@ PHPAPI void php_var_export_ex(zval **struc, int level, smart_str *buf TSRMLS_DC)
 		break;
 
 	case IS_OBJECT:
-		myht = Z_OBJPROP_PP(struc);
+		myht = Z_OBJDEBUG_PP(struc, is_temp);
 		if(myht && myht->nApplyCount > 0){
 			smart_str_appendl(buf, "NULL", 4);
 			zend_error(E_WARNING, "var_export does not handle circular references");
@@ -491,6 +492,11 @@ PHPAPI void php_var_export_ex(zval **struc, int level, smart_str *buf TSRMLS_DC)
 		efree((char*)class_name);
 		if (myht) {
 			zend_hash_apply_with_arguments(myht TSRMLS_CC, (apply_func_args_t) php_object_element_export, 1, level, buf);
+
+			if (is_temp) {
+				zend_hash_destroy(myht);
+				efree(myht);
+			}
 		}
 		if (level > 1) {
 			buffer_append_spaces(buf, level - 1);
