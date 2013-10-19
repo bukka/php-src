@@ -451,7 +451,6 @@ static const zend_function_entry date_funcs_interface[] = {
 	PHP_ABSTRACT_ME(DateTimeInterface, getOffset, arginfo_date_method_offset_get)
 	PHP_ABSTRACT_ME(DateTimeInterface, getTimestamp, arginfo_date_method_timestamp_get)
 	PHP_ABSTRACT_ME(DateTimeInterface, diff, arginfo_date_method_diff)
-	PHP_ABSTRACT_ME(DateTimeInterface, __wakeup, NULL)
 	PHP_FE_END
 };
 
@@ -2373,7 +2372,9 @@ static int date_object_unserialize(zval **object, zend_class_entry *ce, const un
 
 	if (php_var_unserialize_properties(ht, &buf, &buf_len, data TSRMLS_CC)) {
 		dateobj = (php_date_obj *) zend_object_store_get_object(*object TSRMLS_CC);
-		date_object_initialize_from_hash(dateobj, ht TSRMLS_CC);
+		if (!date_object_initialize_from_hash(dateobj, ht TSRMLS_CC)) {
+			php_error(E_ERROR, "Invalid serialization data for DateTime object");
+		}
 		retval = (int) buf_len;
 	} else {
 		retval = -1;
