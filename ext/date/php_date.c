@@ -2147,12 +2147,14 @@ static zval* date_clone_immutable(zval *object TSRMLS_DC)
 	return new_object;
 }
 
+static inline int date_object_internal_property_key(char *key)
+{
+	return key && (!strcmp(key, "date") || !strcmp(key, "timezone") ||!strcmp(key, "timezone_type"));
+}
+
 static void date_object_write_property(zval *object, zval *member, zval *value, const zend_literal *key TSRMLS_DC)
 {
-	if (Z_TYPE_P(member) == IS_STRING &&
-			(!strcmp(Z_STRVAL_P(member), "date") ||
-			 !strcmp(Z_STRVAL_P(member), "timezone") ||
-			 !strcmp(Z_STRVAL_P(member), "timezone_type"))) {
+	if ( Z_TYPE_P(member) == IS_STRING && date_object_internal_property_key(Z_STRVAL_P(member))) {
 		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Redefining internal property '%s' is not allowed", Z_STRVAL_P(member));
 		return;
 	}
@@ -2319,6 +2321,7 @@ static int date_object_initialize_from_hash(php_date_obj *dateobj, HashTable *my
 	zval             *tmp_obj = NULL;
 	timelib_tzinfo   *tzi;
 	php_timezone_obj *tzobj;
+	int              ret = 0;
 
 	if (zend_hash_find(myht, "date", 5, (void**) &z_date) == SUCCESS) {
 		convert_to_string(*z_date);
@@ -2331,15 +2334,12 @@ static int date_object_initialize_from_hash(php_date_obj *dateobj, HashTable *my
 					case TIMELIB_ZONETYPE_OFFSET:
 					case TIMELIB_ZONETYPE_ABBR: {
 						char *tmp = emalloc(Z_STRLEN_PP(z_date) + Z_STRLEN_PP(z_timezone) + 2);
-						int ret;
 						snprintf(tmp, Z_STRLEN_PP(z_date) + Z_STRLEN_PP(z_timezone) + 2, "%s %s", Z_STRVAL_PP(z_date), Z_STRVAL_PP(z_timezone));
 						ret = php_date_initialize(dateobj, tmp, Z_STRLEN_PP(z_date) + Z_STRLEN_PP(z_timezone) + 1, NULL, NULL, 0 TSRMLS_CC);
 						efree(tmp);
-						return 1 == ret;
 					}
 
 					case TIMELIB_ZONETYPE_ID: {
-						int ret;
 						convert_to_string(*z_timezone);
 
 						tzi = php_date_parse_tzfile(Z_STRVAL_PP(z_timezone), DATE_TIMEZONEDB TSRMLS_CC);
@@ -2352,27 +2352,45 @@ static int date_object_initialize_from_hash(php_date_obj *dateobj, HashTable *my
 
 						ret = php_date_initialize(dateobj, Z_STRVAL_PP(z_date), Z_STRLEN_PP(z_date), NULL, tmp_obj, 0 TSRMLS_CC);
 						zval_ptr_dtor(&tmp_obj);
-						return 1 == ret;
 					}
 				}
 			}
 		}
 	}
-	return 0;
+	if (ret && zend_hash_num_elements(myht) > 3) {
+		char *key = NULL;
+		uint key_len;
+		ulong index;
+		zval *value;
+		zval **z_data;
+
+		if (!dateobj->std.properties) {
+			rebuild_object_properties(&dateobj->std);
+		}
+		for (zend_hash_internal_pointer_reset(myht); zend_hash_get_current_data(myht, (void **) &z_data) == SUCCESS; zend_hash_move_forward(myht)) {
+			zend_hash_get_current_key_ex(myht, &key, &key_len, &index, 0, NULL);
+			if (!date_object_internal_property_key(key)) {
+				MAKE_STD_ZVAL(value);
+				ZVAL_ZVAL(value, *z_data, 1, 0);
+				zend_hash_update(dateobj->std.properties, key, key_len, (void *) &value, sizeof(zval *), NULL);
+			}
+		}
+	}
+	return ret;
 }
 
 static int date_object_unserialize(zval **object, zend_class_entry *ce, const unsigned char *buf, zend_uint buf_len, zend_unserialize_data *data TSRMLS_DC)
 {
-	HashTable *ht;
+	HashTable *myht;
 	php_date_obj *dateobj;
 	int retval;
 
-	ALLOC_HASHTABLE(ht);
-	zend_hash_init(ht, 3, NULL, ZVAL_PTR_DTOR, 0);
+	ALLOC_HASHTABLE(myht);
+	zend_hash_init(myht, 3, NULL, ZVAL_PTR_DTOR, 0);
 
-	if (php_var_unserialize_properties(ht, &buf, &buf_len, data TSRMLS_CC)) {
+	if (php_var_unserialize_properties(myht, &buf, &buf_len, data TSRMLS_CC)) {
 		dateobj = (php_date_obj *) zend_object_store_get_object(*object TSRMLS_CC);
-		if (!date_object_initialize_from_hash(dateobj, ht TSRMLS_CC)) {
+		if (!date_object_initialize_from_hash(dateobj, myht TSRMLS_CC)) {
 			php_error(E_ERROR, "Invalid serialization data for DateTime object");
 		}
 		retval = (int) buf_len;
@@ -2380,8 +2398,8 @@ static int date_object_unserialize(zval **object, zend_class_entry *ce, const un
 		retval = -1;
 	}
 
-	zend_hash_destroy(ht);
-	FREE_HASHTABLE(ht);
+	zend_hash_destroy(myht);
+	FREE_HASHTABLE(myht);
 	return retval;
 }
 
