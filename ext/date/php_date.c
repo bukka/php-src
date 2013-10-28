@@ -2147,14 +2147,14 @@ static zval* date_clone_immutable(zval *object TSRMLS_DC)
 	return new_object;
 }
 
-static inline int date_object_internal_property_key(char *key)
+static inline int date_object_is_internal_property_key(char *key)
 {
 	return key && (!strcmp(key, "date") || !strcmp(key, "timezone") ||!strcmp(key, "timezone_type"));
 }
 
 static void date_object_write_property(zval *object, zval *member, zval *value, const zend_literal *key TSRMLS_DC)
 {
-	if ( Z_TYPE_P(member) == IS_STRING && date_object_internal_property_key(Z_STRVAL_P(member))) {
+	if ( Z_TYPE_P(member) == IS_STRING && date_object_is_internal_property_key(Z_STRVAL_P(member))) {
 		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Redefining internal property '%s' is not allowed", Z_STRVAL_P(member));
 		return;
 	}
@@ -2369,7 +2369,7 @@ static int date_object_initialize_from_hash(php_date_obj *dateobj, HashTable *my
 		}
 		for (zend_hash_internal_pointer_reset(myht); zend_hash_get_current_data(myht, (void **) &z_data) == SUCCESS; zend_hash_move_forward(myht)) {
 			zend_hash_get_current_key_ex(myht, &key, &key_len, &index, 0, NULL);
-			if (!date_object_internal_property_key(key)) {
+			if (!date_object_is_internal_property_key(key)) {
 				MAKE_STD_ZVAL(value);
 				ZVAL_ZVAL(value, *z_data, 1, 0);
 				zend_hash_update(dateobj->std.properties, key, key_len, (void *) &value, sizeof(zval *), NULL);
