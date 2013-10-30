@@ -25,10 +25,8 @@
 #include "php_gmp.h"
 #include "ext/standard/info.h"
 #include "ext/standard/php_var.h"
-#include "ext/standard/php_smart_str_public.h"
+#include "ext/standard/php_smart_str.h"
 #include "zend_exceptions.h"
-#include "zend_interfaces.h"
-
 #if HAVE_GMP
 
 #include <gmp.h>
@@ -567,6 +565,69 @@ static int gmp_cast_object(zval *readobj, zval *writeobj, int type TSRMLS_DC) /*
 }
 /* }}} */
 
+static int gmp_serialize_object(zval *obj, unsigned char **buffer, zend_uint *buf_len, zend_serialize_data *data TSRMLS_DC) /* {{{ */
+{
+	HashTable *props = zend_std_get_properties(obj TSRMLS_CC);
+	int props_num = zend_hash_num_elements(props);
+	mpz_ptr gmpnum = GET_GMP_FROM_ZVAL(obj);
+	smart_str buf = {0};
+	zval zv;
+	php_var_serialize_object_start(&buf, obj, 1 + props_num TSRMLS_CC);
+	gmp_strval(&zv, gmpnum, 10);
+	php_var_serialize_property_string(&buf, "num", Z_STRVAL(zv));
+	zval_dtor(&zv);
+	if (props_num > 0) {
+		php_var_serialize_properties(&buf, props, data TSRMLS_CC);
+	}
+	php_var_serialize_object_end(&buf);
+
+	smart_str_0(&buf);
+	*buffer = (unsigned char *) buf.c;
+	*buf_len = buf.len;
+
+	return PHP_SERIALIZE_OBJECT;
+}
+/* }}} */
+
+static int gmp_unserialize_object(zval **object, zend_class_entry *ce, const unsigned char *buf, zend_uint buf_len, zend_unserialize_data *data TSRMLS_DC) /* {{{ */
+{
+	HashTable *props;
+	zval key, value, *pvalue;
+	zend_bool success = 0;
+
+	if (Z_TYPE_PP(object) == IS_NULL) {
+		object_init_ex(*object, ce);
+	}
+	props = zend_std_get_properties(*object TSRMLS_CC);
+
+	while (php_var_unserialize_has_properties(buf, buf_len))
+	{
+		if (!php_var_unserialize_property(&key, &value, &buf, &buf_len, data TSRMLS_CC)) {
+			return -1;
+		}
+
+		if (!strcmp(Z_STRVAL(key), "num") && Z_TYPE(value) == IS_STRING && Z_STRLEN(value) > 0) {
+			mpz_ptr gmpnumber = GET_GMP_FROM_ZVAL(*object);
+			if (convert_to_gmp(gmpnumber, &value, 10 TSRMLS_CC) == SUCCESS) {
+				success = 1;
+			}
+		} else {
+			MAKE_STD_ZVAL(pvalue);
+			ZVAL_ZVAL(pvalue, &value, 1, 0);
+			zend_hash_update(props, Z_STRVAL(key), Z_STRLEN(key), (void *) &pvalue, sizeof(zval *), NULL);
+		}
+		zval_dtor(&key);
+		zval_dtor(&value);
+	}
+
+	if (!success) {
+		zend_throw_exception(NULL, "Could not unserialize number", 0 TSRMLS_CC);
+	}
+
+	return (int) buf_len;
+}
+/* }}} */
+
 static HashTable *gmp_get_debug_info(zval *obj, int *is_temp TSRMLS_DC) /* {{{ */
 {
 	HashTable *ht, *props = zend_std_get_properties(obj TSRMLS_CC);
@@ -686,99 +747,6 @@ static int gmp_compare(zval *result, zval *op1, zval *op2 TSRMLS_DC) /* {{{ */
 }
 /* }}} */
 
-PHP_METHOD(GMP, serialize) /* {{{ */
-{
-	mpz_ptr gmpnum = GET_GMP_FROM_ZVAL(getThis());
-	smart_str buf = {0};
-	php_serialize_data_t var_hash;
-	zval zv, *zv_ptr = &zv;
-
-	if (zend_parse_parameters_none() == FAILURE) {
-		return;
-	}
-
-	PHP_VAR_SERIALIZE_INIT(var_hash);
-
-	INIT_PZVAL(zv_ptr);
-
-	gmp_strval(zv_ptr, gmpnum, 10);
-	php_var_serialize(&buf, &zv_ptr, &var_hash TSRMLS_CC);
-	zval_dtor(zv_ptr);
-
-	Z_ARRVAL_P(zv_ptr) = zend_std_get_properties(getThis() TSRMLS_CC);
-	Z_TYPE_P(zv_ptr) = IS_ARRAY;
-	php_var_serialize(&buf, &zv_ptr, &var_hash TSRMLS_CC);
-
-	PHP_VAR_SERIALIZE_DESTROY(var_hash);
-
-	if (buf.c) {
-		RETURN_STRINGL(buf.c, buf.len, 0);
-	}
-}
-/* }}} */
-
-PHP_METHOD(GMP, unserialize) /* {{{ */
-{
-	mpz_ptr gmpnum = GET_GMP_FROM_ZVAL(getThis());
-	char *str;
-	int str_len;
-	php_unserialize_data_t var_hash;
-	const unsigned char *p, *max;
-	zval zv, *zv_ptr = &zv;
-
-	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s", &str, &str_len) == FAILURE) {
-		return;
-	}
-
-	PHP_VAR_UNSERIALIZE_INIT(var_hash);
-
-	p = (unsigned char *) str;
-	max = (unsigned char *) str + str_len;
-
-	INIT_ZVAL(zv);
-	if (!php_var_unserialize(&zv_ptr, &p, max, &var_hash TSRMLS_CC)
-		|| Z_TYPE_P(zv_ptr) != IS_STRING
-		|| convert_to_gmp(gmpnum, zv_ptr, 10 TSRMLS_CC) == FAILURE
-	) {
-		zend_throw_exception(NULL, "Could not unserialize number", 0 TSRMLS_CC);
-		goto exit;
-	}
-	zval_dtor(&zv);
-
-	INIT_ZVAL(zv);
-	if (!php_var_unserialize(&zv_ptr, &p, max, &var_hash TSRMLS_CC)
-		|| Z_TYPE_P(zv_ptr) != IS_ARRAY
-	) {
-		zend_throw_exception(NULL, "Could not unserialize properties", 0 TSRMLS_CC);
-		goto exit;
-	}
-
-	if (zend_hash_num_elements(Z_ARRVAL_P(zv_ptr)) != 0) {
-		zend_hash_copy(
-			zend_std_get_properties(getThis() TSRMLS_CC), Z_ARRVAL_P(zv_ptr),
-			(copy_ctor_func_t) zval_add_ref, NULL, sizeof(zval *)
-		);
-	}
-
-exit:
-	zval_dtor(&zv);
-	PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
-}
-/* }}} */
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_serialize, 0, 0, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_unserialize, 0, 0, 1)
-ZEND_ARG_INFO(0, serialized)
-ZEND_END_ARG_INFO()
-
-const zend_function_entry gmp_methods[] = {
-	PHP_ME(GMP, serialize, arginfo_serialize, ZEND_ACC_PUBLIC)
-	PHP_ME(GMP, unserialize, arginfo_unserialize, ZEND_ACC_PUBLIC)
-	PHP_FE_END
-};
-
 /* {{{ ZEND_GINIT_FUNCTION
  */
 static ZEND_GINIT_FUNCTION(gmp)
@@ -792,10 +760,11 @@ static ZEND_GINIT_FUNCTION(gmp)
 ZEND_MINIT_FUNCTION(gmp)
 {
 	zend_class_entry tmp_ce;
-	INIT_CLASS_ENTRY(tmp_ce, "GMP", gmp_methods);
+	INIT_CLASS_ENTRY(tmp_ce, "GMP", NULL);
 	gmp_ce = zend_register_internal_class(&tmp_ce TSRMLS_CC);
-	zend_class_implements(gmp_ce TSRMLS_CC, 1, zend_ce_serializable);
 	gmp_ce->create_object = gmp_create_object;
+	gmp_ce->serialize = gmp_serialize_object;
+	gmp_ce->unserialize = gmp_unserialize_object;
 
 	memcpy(&gmp_object_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
 	gmp_object_handlers.cast_object = gmp_cast_object;
