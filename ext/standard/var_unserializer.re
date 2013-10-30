@@ -381,6 +381,7 @@ static inline int object_custom(UNSERIALIZE_PARAMETER, zend_class_entry *ce)
 		return 0;
 	}
 
+	ZVAL_NULL(*rval);
 	if (ce->unserialize == NULL) {
 		zend_error(E_WARNING, "Class %s has no unserializer", ce->name);
 		object_init_ex(*rval, ce);
