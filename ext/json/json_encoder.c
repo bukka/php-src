@@ -239,12 +239,30 @@ static void php_json_encode_array(smart_str *buf, zval *val, int options) /* {{{
 }
 /* }}} */
 
+static inline char *php_json_escape_string_flush_ex(smart_str *buf, char *mark, char *s, char *esc, size_t esc_len, int extralen) /* {{{ */
+{
+	char *prechar = s - extralen;
+	if (prechar != mark) {
+		smart_str_appendl(buf, mark, (size_t) (prechar - mark));
+	}
+	if (esc_len) {
+		smart_str_appendl(buf, esc, esc_len);
+	}
+	return s + 1;
+}
+/* }}} */
+
+static inline char *php_json_escape_string_flush(smart_str *buf, char *mark, char *s, char *esc, size_t esc_len) /* {{{ */
+{
+	return php_json_escape_string_flush_ex(buf, mark, s, esc, esc_len, 0);
+}
+/* }}} */
+
 static void php_json_escape_string(smart_str *buf, char *s, size_t len, int options) /* {{{ */
 {
 	size_t pos, checkpoint;
-	unsigned int us;
-	int codepoint, state;
-
+	int codepoint, codelen, state;
+	char *mark;
 
 	if (len == 0) {
 		smart_str_appendl(buf, "\"\"", 2);
@@ -270,116 +288,92 @@ static void php_json_escape_string(smart_str *buf, char *s, size_t len, int opti
 
 	checkpoint = buf->s ? buf->s->len : 0;
 	state = PHP_JSON_UTF8_ACCEPT;
+	codelen = 0;
+	mark = s;
 
 	/* pre-allocate for string length plus 2 quotes */
 	smart_str_alloc(buf, len+2, 0);
 	smart_str_appendc(buf, '"');
 
-	for (pos = 0; pos < len; pos++) {
-		us = (unsigned char) s[pos];
-		if (php_json_utf8_decode(&state, &codepoint, us)) {
+	for (pos = 0; pos < len; pos++, s++) {
+		if (php_json_utf8_decode(&state, &codepoint, (unsigned char) *s)) {
+			codelen++;
 			continue;
 		}
 
 		switch (codepoint) {
 			case '"':
 				if (options & PHP_JSON_HEX_QUOT) {
-					smart_str_appendl(buf, "\\u0022", 6);
+					mark = php_json_escape_string_flush(buf, mark, s, "\\u0022", 6);
 				} else {
-					smart_str_appendl(buf, "\\\"", 2);
+					mark = php_json_escape_string_flush(buf, mark, s, "\\\"", 2);
 				}
 				break;
 
 			case '\\':
-				smart_str_appendl(buf, "\\\\", 2);
+				mark = php_json_escape_string_flush(buf, mark, s, "\\\\", 2);
 				break;
 
 			case '/':
-				if (options & PHP_JSON_UNESCAPED_SLASHES) {
-					smart_str_appendc(buf, '/');
-				} else {
-					smart_str_appendl(buf, "\\/", 2);
+				if (!(options & PHP_JSON_UNESCAPED_SLASHES)) {
+					mark = php_json_escape_string_flush(buf, mark, s, "\\/", 2);
 				}
 				break;
 
 			case '\b':
-				smart_str_appendl(buf, "\\b", 2);
+				mark = php_json_escape_string_flush(buf, mark, s, "\\b", 2);
 				break;
 
 			case '\f':
-				smart_str_appendl(buf, "\\f", 2);
+				mark = php_json_escape_string_flush(buf, mark, s, "\\f", 2);
 				break;
 
 			case '\n':
-				smart_str_appendl(buf, "\\n", 2);
+				mark = php_json_escape_string_flush(buf, mark, s, "\\n", 2);
 				break;
 
 			case '\r':
-				smart_str_appendl(buf, "\\r", 2);
+				mark = php_json_escape_string_flush(buf, mark, s, "\\r", 2);
 				break;
 
 			case '\t':
-				smart_str_appendl(buf, "\\t", 2);
+				mark = php_json_escape_string_flush(buf, mark, s, "\\t", 2);
 				break;
 
 			case '<':
 				if (options & PHP_JSON_HEX_TAG) {
-					smart_str_appendl(buf, "\\u003C", 6);
-				} else {
-					smart_str_appendc(buf, '<');
+					mark = php_json_escape_string_flush(buf, mark, s, "\\u003C", 6);
 				}
 				break;
 
 			case '>':
 				if (options & PHP_JSON_HEX_TAG) {
-					smart_str_appendl(buf, "\\u003E", 6);
-				} else {
-					smart_str_appendc(buf, '>');
+					mark = php_json_escape_string_flush(buf, mark, s, "\\u003E", 6);
 				}
 				break;
 
 			case '&':
 				if (options & PHP_JSON_HEX_AMP) {
-					smart_str_appendl(buf, "\\u0026", 6);
-				} else {
-					smart_str_appendc(buf, '&');
+					mark = php_json_escape_string_flush(buf, mark, s, "\\u0026", 6);
 				}
 				break;
 
 			case '\'':
 				if (options & PHP_JSON_HEX_APOS) {
-					smart_str_appendl(buf, "\\u0027", 6);
-				} else {
-					smart_str_appendc(buf, '\'');
+					mark = php_json_escape_string_flush(buf, mark, s, "\\u0027", 6);
 				}
 				break;
 
 			default:
-				if (codepoint >= ' ' && ((options & PHP_JSON_UNESCAPED_UNICODE) || codepoint <= 0x7f)) {
-					if (codepoint <= 0x7f) {
-						smart_str_appendc(buf, (unsigned char) codepoint);
-					} else if (codepoint <= 0x7ff) {
-						smart_str_appendc(buf, (unsigned char) (0xc0 + (codepoint >> 6)));
-						smart_str_appendc(buf, (unsigned char) (0x80 + (codepoint & 0x3f)));
-					} else if (codepoint <= 0xffff) {
-						smart_str_appendc(buf, (unsigned char) (0xe0 + (codepoint >> 12)));
-						smart_str_appendc(buf, (unsigned char) (0x80 + ((codepoint >> 6) & 0x3f)));
-						smart_str_appendc(buf, (unsigned char) (0x80 + (codepoint & 0x3f)));
-					} else if (codepoint <= 0x1ffff) {
-						smart_str_appendc(buf, (unsigned char) (0xf0 + (codepoint >> 18)));
-						smart_str_appendc(buf, (unsigned char) (0x80 + ((codepoint >> 12) & 0x3f)));
-						smart_str_appendc(buf, (unsigned char) (0x80 + ((codepoint >> 6) & 0x3f)));
-						smart_str_appendc(buf, (unsigned char) (0x80 + (codepoint & 0x3f)));
-					}
-				} else {
+				if (codepoint < ' ' || (!(options & PHP_JSON_UNESCAPED_UNICODE) && codepoint > 0x7f)) {
+					mark = php_json_escape_string_flush_ex(buf, mark, s, "\\u", 2, codepoint < ' ' ? 0 : codelen);
+					codelen = 0;
 					if (codepoint <= 0xffff) {
-						smart_str_appendl(buf, "\\u", 2);
 						smart_str_appendc(buf, digits[(codepoint & 0xf000) >> 12]);
 						smart_str_appendc(buf, digits[(codepoint & 0xf00) >> 8]);
 						smart_str_appendc(buf, digits[(codepoint & 0xf0) >> 4]);
 						smart_str_appendc(buf, digits[(codepoint & 0xf)]);
 					} else {
-						smart_str_appendl(buf, "\\u", 2);
 						smart_str_appendc(buf, digits[((0xD7C0 + (codepoint >> 10)) & 0xf000) >> 12]);
 						smart_str_appendc(buf, digits[((0xD7C0 + (codepoint >> 10)) & 0xf00) >> 8]);
 						smart_str_appendc(buf, digits[((0xD7C0 + (codepoint >> 10)) & 0xf0) >> 4]);
@@ -404,6 +398,9 @@ static void php_json_escape_string(smart_str *buf, char *s, size_t len, int opti
 		return;
 	}
 
+	if (mark < s) {
+		smart_str_appendl(buf, mark, s - mark);
+	}
 	smart_str_appendc(buf, '"');
 }
 /* }}} */
