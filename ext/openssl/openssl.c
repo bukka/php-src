@@ -1278,6 +1278,7 @@ PHP_MSHUTDOWN_FUNCTION(openssl)
 	EVP_cleanup();
 
 #if OPENSSL_VERSION_NUMBER >= 0x00090805f
+	CRYPTO_set_locking_callback(NULL);
 	ERR_free_strings();
 #endif
 
