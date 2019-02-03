@@ -88,7 +88,7 @@ int fpm_init(int argc, char **argv, char *config, char *prefix, char *pid, int t
 
 /*	children: return listening socket
 	parent: never return */
-int fpm_run(int *max_requests) /* {{{ */
+struct fpm_worker_pool_s *fpm_run(int *max_requests) /* {{{ */
 {
 	struct fpm_worker_pool_s *wp;
 
@@ -117,6 +117,6 @@ run_child: /* only workers reach this point */
 	fpm_cleanups_run(FPM_CLEANUP_CHILD);
 
 	*max_requests = fpm_globals.max_requests;
-	return fpm_globals.listening_socket;
+	return wp;
 }
 /* }}} */

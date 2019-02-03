@@ -24,27 +24,22 @@ static char **limit_extensions = NULL;
 static int fpm_php_zend_ini_alter_master(char *name, int name_length, char *new_value, int new_value_length, int mode, int stage) /* {{{ */
 {
 	zend_ini_entry *ini_entry;
-	zend_string *duplicate;
+	zend_string *name_str, *value_str;
+	int rc;
 
 	if ((ini_entry = zend_hash_str_find_ptr(EG(ini_directives), name, name_length)) == NULL) {
 		return FAILURE;
 	}
 
-	duplicate = zend_string_init(new_value, new_value_length, 1);
+	name_str = zend_string_init(name, name_length, 0);
+	value_str = zend_string_init(new_value, new_value_length, 0);
 
-	if (!ini_entry->on_modify
-			|| ini_entry->on_modify(ini_entry, duplicate,
-				ini_entry->mh_arg1, ini_entry->mh_arg2, ini_entry->mh_arg3, stage) == SUCCESS) {
-		ini_entry->value = duplicate;
-		/* when mode == ZEND_INI_USER keep unchanged to allow ZEND_INI_PERDIR (.user.ini) */
-		if (mode == ZEND_INI_SYSTEM) {
-			ini_entry->modifiable = mode;
-		}
-	} else {
-		zend_string_release_ex(duplicate, 1);
-	}
+	/* TODO: check when mode == ZEND_INI_USER keep unchanged to allow ZEND_INI_PERDIR (.user.ini) */
+	rc = zend_alter_ini_entry_ex(name_str, value_str, mode, ZEND_INI_STAGE_ACTIVATE, 0);
+	zend_string_release_ex(name_str, 0);
+	zend_string_release_ex(value_str, 0);
 
-	return SUCCESS;
+	return rc;
 }
 /* }}} */
 
@@ -113,7 +108,7 @@ int fpm_php_apply_defines_ex(struct key_value_s *kv, int mode) /* {{{ */
 }
 /* }}} */
 
-static int fpm_php_apply_defines(struct fpm_worker_pool_s *wp) /* {{{ */
+int fpm_php_apply_defines(struct fpm_worker_pool_s *wp) /* {{{ */
 {
 	struct key_value_s *kv;
 
@@ -217,8 +212,7 @@ int fpm_php_init_main() /* {{{ */
 
 int fpm_php_init_child(struct fpm_worker_pool_s *wp) /* {{{ */
 {
-	if (0 > fpm_php_apply_defines(wp) ||
-		0 > fpm_php_set_allowed_clients(wp)) {
+	if (0 > fpm_php_set_allowed_clients(wp)) {
 		return -1;
 	}
 

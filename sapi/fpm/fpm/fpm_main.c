@@ -93,6 +93,7 @@ int __riscosify_control = __RISCOSIFY_STRICT_UNIX_SPECS;
 #include "fpm_conf.h"
 #include "fpm_php.h"
 #include "fpm_log.h"
+#include "fpm_worker_pool.h"
 #include "zlog.h"
 
 /* XXX this will need to change later when threaded fastcgi is implemented.  shane */
@@ -1561,7 +1562,7 @@ int main(int argc, char *argv[])
 
 	int max_requests = 0;
 	int requests = 0;
-	int fcgi_fd = 0;
+	struct fpm_worker_pool_s *wp;
 	fcgi_request *request;
 	char *fpm_config = NULL;
 	char *fpm_prefix = NULL;
@@ -1861,7 +1862,7 @@ consult the installation file that came with this distribution, or visit \n\
 	}
 	fpm_is_running = 1;
 
-	fcgi_fd = fpm_run(&max_requests);
+	wp = fpm_run(&max_requests);
 	parent = 0;
 
 	/* onced forked tell zlog to also send messages through sapi_cgi_log_fastcgi() */
@@ -1872,7 +1873,7 @@ consult the installation file that came with this distribution, or visit \n\
 	php_import_environment_variables = cgi_php_import_environment_variables;
 
 	/* library is already initialized, now init our request */
-	request = fpm_init_request(fcgi_fd);
+	request = fpm_init_request(fpm_globals.listening_socket);
 
 	zend_first_try {
 		while (EXPECTED(fcgi_accept_request(request) >= 0)) {
@@ -1880,6 +1881,7 @@ consult the installation file that came with this distribution, or visit \n\
 			request_body_fd = -1;
 			SG(server_context) = (void *) request;
 			init_request_info();
+			fpm_php_apply_defines(wp);
 
 			fpm_request_info();
 

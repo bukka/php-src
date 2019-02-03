@@ -33,8 +33,9 @@
 #define FPM_EXIT_CONFIG 78
 #endif
 
+#include "fpm_worker_pool.h"
 
-int fpm_run(int *max_requests);
+struct fpm_worker_pool_s *fpm_run(int *max_requests);
 int fpm_init(int argc, char **argv, char *config, char *prefix, char *pid, int test_conf, int run_as_root, int force_daemon, int force_stderr);
 
 struct fpm_globals_s {
