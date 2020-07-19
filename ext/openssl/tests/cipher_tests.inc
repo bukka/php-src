@@ -1,5 +1,18 @@
 <?php
 $php_openssl_cipher_tests = array(
+    'aes-128-ccm' => array(
+        array(
+            'key' => '404142434445464748494a4b4c4d4e4f',
+            'iv'  => '101112131415161718191a1b',
+            'aad' => '000102030405060708090a0b0c0d0e0f' .
+                     '10111213',
+            'tag' => '67c99240c7d51048',
+            'pt'  => '202122232425262728292a2b2c2d2e2f' .
+                     '3031323334353637',
+            'ct'  => 'e3b201a9f5b71a7a9b1ceaeccd97e70b' .
+                     '6176aad9a4428aa5484392fbc1b09951',
+        ),
+    ),
     'aes-256-ccm' => array(
         array(
             'key' => '1bde3251d41a8b5ea013c195ae128b21' .
