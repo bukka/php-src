@@ -1388,10 +1388,11 @@ class Tester
     /**
      * Expect log entry.
      *
-     * @param string      $type    The log type
-     * @param string      $message The expected message
-     * @param string|null $pool    The pool for pool prefixed log entry
-     * @param int         $count   The number of items
+     * @param string      $type         The log type
+     * @param string      $message      The expected message
+     * @param string|null $pool         The pool for pool prefixed log entry
+     * @param int         $count        The number of items
+     * @param bool        $checkAllLogs Whether to also check past logs.
      *
      * @return bool
      * @throws \Exception
@@ -1400,10 +1401,11 @@ class Tester
         string $type,
         string $message,
         string $pool = null,
-        int $count = 1
+        int $count = 1,
+        bool $checkAllLogs = false
     ): bool {
         for ($i = 0; $i < $count; $i++) {
-            if ( ! $this->logTool->expectEntry($type, $message, $pool)) {
+            if ( ! $this->logTool->expectEntry($type, $message, $pool, $checkAllLogs)) {
                 return false;
             }
         }
@@ -1417,13 +1419,18 @@ class Tester
      * @param string      $message
      * @param string|null $pool
      * @param int         $count
+     * @param bool        $checkAllLogs Whether to also check past logs.
      *
      * @return bool
      * @throws \Exception
      */
-    public function expectLogDebug(string $message, string $pool = null, int $count = 1): bool
-    {
-        return $this->expectLogEntry(LogTool::DEBUG, $message, $pool, $count);
+    public function expectLogDebug(
+        string $message,
+        string $pool = null,
+        int $count = 1,
+        bool $checkAllLogs = false
+    ): bool {
+        return $this->expectLogEntry(LogTool::DEBUG, $message, $pool, $count, $checkAllLogs);
     }
 
     /**
@@ -1432,13 +1439,18 @@ class Tester
      * @param string      $message
      * @param string|null $pool
      * @param int         $count
+     * @param bool        $checkAllLogs Whether to also check past logs.
      *
      * @return bool
      * @throws \Exception
      */
-    public function expectLogNotice(string $message, string $pool = null, int $count = 1): bool
-    {
-        return $this->expectLogEntry(LogTool::NOTICE, $message, $pool, $count);
+    public function expectLogNotice(
+        string $message,
+        string $pool = null,
+        int $count = 1,
+        bool $checkAllLogs = false
+    ): bool {
+        return $this->expectLogEntry(LogTool::NOTICE, $message, $pool, $count, $checkAllLogs);
     }
 
     /**
@@ -1447,13 +1459,18 @@ class Tester
      * @param string      $message
      * @param string|null $pool
      * @param int         $count
+     * @param bool        $checkAllLogs Whether to also check past logs.
      *
      * @return bool
      * @throws \Exception
      */
-    public function expectLogWarning(string $message, string $pool = null, int $count = 1): bool
-    {
-        return $this->expectLogEntry(LogTool::WARNING, $message, $pool, $count);
+    public function expectLogWarning(
+        string $message,
+        string $pool = null,
+        int $count = 1,
+        bool $checkAllLogs = false
+    ): bool {
+        return $this->expectLogEntry(LogTool::WARNING, $message, $pool, $count, $checkAllLogs);
     }
 
     /**
@@ -1462,13 +1479,18 @@ class Tester
      * @param string      $message
      * @param string|null $pool
      * @param int         $count
+     * @param bool        $checkAllLogs Whether to also check past logs.
      *
      * @return bool
      * @throws \Exception
      */
-    public function expectLogError(string $message, string $pool = null, int $count = 1): bool
-    {
-        return $this->expectLogEntry(LogTool::ERROR, $message, $pool, $count);
+    public function expectLogError(
+        string $message,
+        string $pool = null,
+        int $count = 1,
+        bool $checkAllLogs = false
+    ): bool {
+        return $this->expectLogEntry(LogTool::ERROR, $message, $pool, $count, $checkAllLogs);
     }
 
     /**
@@ -1477,13 +1499,18 @@ class Tester
      * @param string      $message
      * @param string|null $pool
      * @param int         $count
+     * @param bool        $checkAllLogs Whether to also check past logs.
      *
      * @return bool
      * @throws \Exception
      */
-    public function expectLogAlert(string $message, string $pool = null, int $count = 1): bool
-    {
-        return $this->expectLogEntry(LogTool::ALERT, $message, $pool, $count);
+    public function expectLogAlert(
+        string $message,
+        string $pool = null,
+        int $count = 1,
+        bool $checkAllLogs = false
+    ): bool {
+        return $this->expectLogEntry(LogTool::ALERT, $message, $pool, $count, $checkAllLogs);
     }
 
     /**
@@ -1512,42 +1539,17 @@ class Tester
      * Expect log config options
      *
      * @param array $options
+     *
      * @return bool
+     * @throws \Exception
      */
     public function expectLogConfigOptions(array $options)
     {
-        $configOptions = $this->getConfigOptions();
         foreach ($options as $name => $value) {
-            if (!isset($configOptions[$name])) {
-                return $this->error("Expected config option: {$name} = {$value} but {$name} is not set");
-            }
-            if ($configOptions[$name] != $value) {
-                return $this->error(
-                    "Expected config option: {$name} = {$value} but got: {$name} = {$configOptions[$name]}"
-                );
-            }
+            $this->expectLogNotice("\s+$name\s=\s$value", checkAllLogs: true);
         }
 
         return true;
-    }
-
-    /**
-     * Get set config options
-     *
-     * @return array
-     */
-    private function getConfigOptions()
-    {
-        $options = [];
-
-        foreach ($this->getLogLines(-1) as $line) {
-            preg_match('/.+NOTICE:\s+(.+)\s=\s(.+)/', $line, $matches);
-            if ($matches) {
-                $options[$matches[1]] = $matches[2];
-            }
-        }
-
-        return $options;
     }
 
     /**

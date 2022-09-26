@@ -129,17 +129,18 @@ class LogTool
      *
      * @param callable $matcher         Callback checking whether the log line matches the expected message.
      * @param string   $notFoundMessage Error message to show if the message is not found.
+     * @param bool     $checkAllLogs    Whether to also check past logs.
      *
      * @return bool
      * @throws \Exception
      */
-    private function match(callable $matcher, string $notFoundMessage): bool
+    private function match(callable $matcher, string $notFoundMessage, bool $checkAllLogs = false): bool
     {
         if ($this->getError()) {
             return false;
         }
 
-        if ($this->logReader->readUntil($matcher, $notFoundMessage)) {
+        if ($this->logReader->readUntil($matcher, $notFoundMessage, $checkAllLogs)) {
             $this->popError();
 
             return true;
@@ -434,7 +435,8 @@ class LogTool
      * @return bool
      * @throws \Exception
      */
-    public function expectReloadingLogsLines(): bool {
+    public function expectReloadingLogsLines(): bool
+    {
         return (
             $this->expectNotice('error log file re-opened') &&
             $this->expectNotice('access log file re-opened')
@@ -574,6 +576,7 @@ class LogTool
      * @param string      $expectedMessage Message to search for
      * @param string|null $pool            Pool that is used and prefixes the message.
      * @param string      $ignoreErrorFor  Ignore error for supplied string in the message.
+     * @param bool        $checkAllLogs    Whether to also check past logs.
      *
      * @return bool
      * @throws \Exception
@@ -582,7 +585,8 @@ class LogTool
         string $type,
         string $expectedMessage,
         string $pool = null,
-        string $ignoreErrorFor = self::DEBUG
+        string $ignoreErrorFor = self::DEBUG,
+        bool $checkAllLogs = false
     ): bool {
         if ($this->getError()) {
             return false;
@@ -590,7 +594,8 @@ class LogTool
 
         return $this->match(
             $this->getEntryMatcher($type, $expectedMessage, $pool, $ignoreErrorFor),
-            "The $type does not match expected message"
+            "The $type does not match expected message",
+            $checkAllLogs
         );
     }
 
