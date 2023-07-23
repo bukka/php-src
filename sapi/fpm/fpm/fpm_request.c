@@ -241,7 +241,7 @@ void fpm_request_check_timed_out(struct fpm_child_s *child, struct timeval *now,
 	}
 #endif
 
-	if (proc.request_stage > FPM_REQUEST_ACCEPTING && ((proc.request_stage < FPM_REQUEST_END) || track_finished)) {
+	if (proc.request_stage > FPM_REQUEST_READING_HEADERS && ((proc.request_stage < FPM_REQUEST_END) || track_finished)) {
 		char purified_script_filename[sizeof(proc.script_filename)];
 		struct timeval tv;
 
@@ -288,7 +288,11 @@ int fpm_request_is_idle(struct fpm_child_s *child) /* {{{ */
 		return 0;
 	}
 
-	return proc->request_stage == FPM_REQUEST_ACCEPTING;
+	zlog(ZLOG_DEBUG, "checking idle - child %d stage is %s",
+			 (int) child->pid, fpm_request_get_stage_name(proc->request_stage));
+
+	/* The application is idle when accepting and reading headers (keep alive connection only) */
+	return proc->request_stage == FPM_REQUEST_READING_HEADERS || proc->request_stage == FPM_REQUEST_ACCEPTING;
 }
 /* }}} */
 
