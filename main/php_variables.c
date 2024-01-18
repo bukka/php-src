@@ -27,8 +27,7 @@
 #include "zend_globals.h"
 
 /* for systems that need to override reading of environment variables */
-void _php_import_environment_variables(zval *array_ptr);
-PHPAPI void (*php_import_environment_variables)(zval *array_ptr) = _php_import_environment_variables;
+PHPAPI void (*php_import_environment_variables)(zval *array_ptr) = php_fetch_environment_variables;
 
 PHPAPI void php_register_variable(const char *var, const char *strval, zval *track_vars_array)
 {
@@ -609,7 +608,7 @@ static zend_always_inline void import_environment_variable(HashTable *ht, char *
 	}
 }
 
-void _php_import_environment_variables(zval *array_ptr)
+PHPAPI void php_fetch_environment_variables(zval *array_ptr)
 {
 	tsrm_env_lock();
 
