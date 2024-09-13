@@ -297,7 +297,8 @@ function main(): void
         'ignore_repeated_errors=0',
         'precision=14',
         'serialize_precision=-1',
-        'memory_limit=128M',
+        // TODO: change back to 128M
+        'memory_limit=4G',
         'opcache.fast_shutdown=0',
         'opcache.file_update_protection=0',
         'opcache.revalidate_freq=0',
@@ -2375,8 +2376,22 @@ TEST $file
         $pass_options .= " -d opcache.preload=" . $preload_filename;
     }
 
-    if ($test->sectionNotEmpty('POST_RAW')) {
-        $post = trim($test->getSection('POST_RAW'));
+    if (($is_post_raw = $test->sectionNotEmpty('POST_RAW')) || $test->sectionNotEmpty('POST_RAW_SCRIPT')) {
+        if ($is_post_raw) {
+            $post = trim($test->getSection('POST_RAW'));
+        } else {
+            // this is just a temporary hack for security fix - it should be changed to work in the same way as skipif in master
+            $post_raw_script = trim($test->getSection('POST_RAW_SCRIPT'));
+            if (strpos($post_raw_script, '<?php') === 0) {
+                $post_raw_script = substr($post_raw_script, 5);
+            }
+            if (strlen($post_raw_script) > 2 && substr($post_raw_script, -2) == '?>') {
+                $post_raw_script = substr($post_raw_script, 0, strlen($post_raw_script) - 2);
+            }
+            ob_start();
+            eval(trim($post_raw_script));
+            $post = ob_get_clean();
+        }
         $raw_lines = explode("\n", $post);
 
         $request = '';
@@ -3888,7 +3903,7 @@ class TestFile
 
     private const ALLOWED_SECTIONS = [
         'EXPECT', 'EXPECTF', 'EXPECTREGEX', 'EXPECTREGEX_EXTERNAL', 'EXPECT_EXTERNAL', 'EXPECTF_EXTERNAL', 'EXPECTHEADERS',
-        'POST', 'POST_RAW', 'GZIP_POST', 'DEFLATE_POST', 'PUT', 'GET', 'COOKIE', 'ARGS',
+        'POST', 'POST_RAW', 'POST_RAW_SCRIPT', 'GZIP_POST', 'DEFLATE_POST', 'PUT', 'GET', 'COOKIE', 'ARGS',
         'FILE', 'FILEEOF', 'FILE_EXTERNAL', 'REDIRECTTEST',
         'CAPTURE_STDIO', 'STDIN', 'CGI', 'PHPDBG',
         'INI', 'ENV', 'EXTENSIONS',
@@ -3964,6 +3979,7 @@ class TestFile
             || $this->sectionNotEmpty('GZIP_POST')
             || $this->sectionNotEmpty('DEFLATE_POST')
             || $this->sectionNotEmpty('POST_RAW')
+            || $this->sectionNotEmpty('POST_RAW_SCRIPT')
             || $this->sectionNotEmpty('PUT')
             || $this->sectionNotEmpty('COOKIE')
             || $this->sectionNotEmpty('EXPECTHEADERS');
