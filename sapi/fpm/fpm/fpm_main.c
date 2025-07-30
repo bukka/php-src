@@ -1869,6 +1869,7 @@ consult the installation file that came with this distribution, or visit \n\
 			init_request_info();
 
 			fpm_request_info();
+			zlog(ZLOG_NOTICE, "req accepted: %p", request);
 
 			/* request startup only after we've done all we can to
 			 *            get path_translated */
@@ -1973,6 +1974,7 @@ fastcgi_request_done:
 
 			fpm_stdio_flush_child();
 
+			zlog(ZLOG_NOTICE, "req shutdown: %p", request);
 			fpm_request_shutdown();
 
 			requests++;

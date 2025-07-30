@@ -99,6 +99,7 @@ void fpm_request_reading_headers(void)
 	fpm_scoreboard_proc_release(proc);
 
 	/* idle--, active++, request++ */
+	zlog(ZLOG_NOTICE, "scoreboard active++");
 	fpm_scoreboard_update_commit(-1, 1, 0, 0, 1, 0, 0, FPM_SCOREBOARD_ACTION_INC, NULL);
 }
 
@@ -215,6 +216,8 @@ void fpm_request_finished(void)
 		return;
 	}
 
+	zlog(ZLOG_NOTICE, "finished");
+
 	proc->request_stage = FPM_REQUEST_FINISHED;
 	proc->tv = now;
 	fpm_scoreboard_proc_release(proc);
@@ -223,6 +226,7 @@ void fpm_request_finished(void)
 void fpm_request_shutdown(void)
 {
 	/* active-- */
+	zlog(ZLOG_NOTICE, "scoreboard active--");
 	fpm_scoreboard_update(0, -1, 0, 0, 0, 0, 0, FPM_SCOREBOARD_ACTION_INC, NULL);
 }
 

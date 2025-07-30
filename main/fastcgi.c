@@ -1066,9 +1066,12 @@ static int fcgi_read_request(fcgi_request *req)
 	len = (hdr.contentLengthB1 << 8) | hdr.contentLengthB0;
 	padding = hdr.paddingLength;
 
+	fcgi_log(FCGI_NOTICE, "fcgi reading 1 (len=%d, type=%d)", len, hdr.type);
+
 	while (hdr.type == FCGI_STDIN && len == 0) {
 		if (safe_read(req, &hdr, sizeof(fcgi_header)) != sizeof(fcgi_header) ||
 		    hdr.version < FCGI_VERSION_1) {
+			fcgi_log(FCGI_NOTICE, "fcgi reading end 1");
 			return 0;
 		}
 
@@ -1077,10 +1080,13 @@ static int fcgi_read_request(fcgi_request *req)
 	}
 
 	if (len + padding > FCGI_MAX_LENGTH) {
+		fcgi_log(FCGI_NOTICE, "fcgi reading end 2 - %d", len + padding);
 		return 0;
 	}
 
 	req->id = (hdr.requestIdB1 << 8) + hdr.requestIdB0;
+
+	fcgi_log(FCGI_NOTICE, "fcgi reading 2 (len=%d, type=%d, id=%d)", len, hdr.type, req->id);
 
 	if (hdr.type == FCGI_BEGIN_REQUEST && len == sizeof(fcgi_begin_request)) {
 		fcgi_begin_request *b;

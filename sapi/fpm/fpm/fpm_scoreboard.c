@@ -183,11 +183,13 @@ void fpm_scoreboard_update_commit(
 			scoreboard->idle = 0;
 		}
 
+		zlog(ZLOG_NOTICE, "prev active: %d", scoreboard->active);
 		if (scoreboard->active + active > 0) {
 			scoreboard->active += active;
 		} else {
 			scoreboard->active = 0;
 		}
+		zlog(ZLOG_NOTICE, "new active: %d", scoreboard->active);
 
 		if (scoreboard->requests + requests > 0) {
 			scoreboard->requests += requests;
