@@ -463,6 +463,8 @@ fprintf(stderr, "stream_free: %s:%p[%s] preserve_handle=%d release_cast=%d remov
 		}
 	}
 
+	bool close_bail = false;
+
 	if (close_options & PHP_STREAM_FREE_CALL_DTOR) {
 		if (release_cast && stream->fclose_stdiocast == PHP_STREAM_FCLOSE_FOPENCOOKIE) {
 			/* calling fclose on an fopencookied stream will ultimately
@@ -476,7 +478,11 @@ fprintf(stderr, "stream_free: %s:%p[%s] preserve_handle=%d release_cast=%d remov
 			return fclose(stream->stdiocast);
 		}
 
-		ret = stream->ops->close(stream, preserve_handle ? 0 : 1);
+		zend_try {
+			ret = stream->ops->close(stream, preserve_handle ? 0 : 1);
+		} zend_catch {
+			close_bail = true;
+		} zend_end_try();
 		stream->abstract = NULL;
 
 		/* tidy up any FILE* that might have been fdopened */
@@ -502,7 +508,11 @@ fprintf(stderr, "stream_free: %s:%p[%s] preserve_handle=%d release_cast=%d remov
 		}
 
 		if (stream->wrapper && stream->wrapper->wops && stream->wrapper->wops->stream_closer) {
-			stream->wrapper->wops->stream_closer(stream->wrapper, stream);
+			zend_try {
+				stream->wrapper->wops->stream_closer(stream->wrapper, stream);
+			}   zend_catch {
+				close_bail = true;
+			} zend_end_try();
 			stream->wrapper = NULL;
 		}
 
@@ -531,6 +541,10 @@ fprintf(stderr, "stream_free: %s:%p[%s] preserve_handle=%d release_cast=%d remov
 
 	if (context) {
 		zend_list_delete(context->res);
+	}
+
+	if (close_bail) {
+		zend_bailout();
 	}
 
 	return ret;
