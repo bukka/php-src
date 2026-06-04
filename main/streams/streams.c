@@ -477,8 +477,6 @@ PHPAPI zend_result php_stream_fill_read_buffer(php_stream *stream, size_t size)
 			php_stream_filter *filter;
 
 			switch (php_stream_call_hook(stream, ZEND_ENUM_StreamOperation_Read)) {
-				case PHP_STREAM_HOOK_STREAM_CLOSED:
-					return FAILURE;
 				case PHP_STREAM_HOOK_INVOKED:
 					// ???: Should polling mechanisms report streams as
 					//      ready when read buffer is non-empty?
@@ -619,8 +617,6 @@ done:
 			}
 
 			switch (php_stream_call_hook(stream, ZEND_ENUM_StreamOperation_Read)) {
-				case PHP_STREAM_HOOK_STREAM_CLOSED:
-					return FAILURE;
 				case PHP_STREAM_HOOK_INVOKED:
 					if (UNEXPECTED(stream->writepos - stream->readpos >= (zend_off_t)size)) {
 						return SUCCESS;
@@ -685,8 +681,6 @@ PHPAPI ssize_t php_stream_read(php_stream *stream, char *buf, size_t size)
 		if (!stream->readfilters.head && ((stream->flags & PHP_STREAM_FLAG_NO_BUFFER) || stream->chunk_size == 1)) {
 
 			switch (php_stream_call_hook(stream, ZEND_ENUM_StreamOperation_Read)) {
-				case PHP_STREAM_HOOK_STREAM_CLOSED:
-					return didread;
 				case PHP_STREAM_HOOK_INVOKED:
 					if (UNEXPECTED(stream->writepos > stream->readpos)) {
 						continue;
@@ -1144,8 +1138,6 @@ seek:
 
 	while (count > 0) {
 		switch (php_stream_call_hook(stream, ZEND_ENUM_StreamOperation_Write)) {
-			case PHP_STREAM_HOOK_STREAM_CLOSED:
-				return didwrite;
 			case PHP_STREAM_HOOK_INVOKED:
 				if (stream->ops->seek && (stream->flags & PHP_STREAM_FLAG_NO_SEEK) == 0 && stream->readpos != stream->writepos) {
 					goto seek;
@@ -2516,17 +2508,16 @@ PHPAPI php_stream_hook_result php_stream_call_hook(php_stream *stream, zend_enum
 		return PHP_STREAM_HOOK_NO_HOOK;
 	}
 
-	zend_resource *res = stream->res;
+	uint32_t orig_no_fclose = stream->flags & PHP_STREAM_FLAG_NO_FCLOSE;
+	stream->flags |= PHP_STREAM_FLAG_NO_FCLOSE;
 
 	zval params[2];
-	ZVAL_RES(&params[0], res);
+	ZVAL_RES(&params[0], stream->res);
 	ZVAL_OBJ(&params[1], php_stream_operation_get_case(operation));
 	zend_call_known_fcc(&FG(hook_fcc), NULL, 2, params, NULL);
 
-	if (res->type == -1) {
-		// TODO: https://wiki.php.net/rfc/stream_errors
-		return PHP_STREAM_HOOK_STREAM_CLOSED;
-	}
+	stream->flags &= ~PHP_STREAM_FLAG_NO_FCLOSE;
+	stream->flags |= orig_no_fclose;
 
 	return PHP_STREAM_HOOK_INVOKED;
 }
