@@ -21,6 +21,8 @@ BEGIN_EXTERN_C()
 
 PHPAPI void php_io_poll_stream_notify_close(php_stream *stream);
 
+extern zend_class_entry *php_io_poll_event_class_entry;
+
 END_EXTERN_C()
 
 #endif /* PHP_IO_POLL_H */

@@ -1,5 +1,5 @@
 /* This is a generated file, edit basic_functions.stub.php instead.
- * Stub hash: 28de4d86212d6b2f7e07208ab8ba07a1ac2a8e70
+ * Stub hash: fa310cb1037575669fa3546aeef4cded171bc0f6
  * Has decl header: yes */
 
 #include "zend_attributes.h"
@@ -4157,13 +4157,15 @@ static zend_class_entry *register_class_RoundingMode(void)
 	return class_entry;
 }
 
-static zend_class_entry *register_class_StreamOperation(void)
+static zend_class_entry *register_class_StreamHookResult(void)
 {
-	zend_class_entry *class_entry = zend_register_internal_enum("StreamOperation", IS_UNDEF, NULL);
+	zend_class_entry *class_entry = zend_register_internal_enum("StreamHookResult", IS_UNDEF, NULL);
 
-	zend_enum_add_case_cstr(class_entry, "Read", NULL);
+	zend_enum_add_case_cstr(class_entry, "Error", NULL);
 
-	zend_enum_add_case_cstr(class_entry, "Write", NULL);
+	zend_enum_add_case_cstr(class_entry, "Timeout", NULL);
+
+	zend_enum_add_case_cstr(class_entry, "Ready", NULL);
 
 	return class_entry;
 }
