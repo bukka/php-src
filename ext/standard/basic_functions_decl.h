@@ -1,8 +1,8 @@
 /* This is a generated file, edit basic_functions.stub.php instead.
- * Stub hash: fa310cb1037575669fa3546aeef4cded171bc0f6 */
+ * Stub hash: b67e9418e158d5726b6a54d446b816264c747116 */
 
-#ifndef ZEND_BASIC_FUNCTIONS_DECL_fa310cb1037575669fa3546aeef4cded171bc0f6_H
-#define ZEND_BASIC_FUNCTIONS_DECL_fa310cb1037575669fa3546aeef4cded171bc0f6_H
+#ifndef ZEND_BASIC_FUNCTIONS_DECL_b67e9418e158d5726b6a54d446b816264c747116_H
+#define ZEND_BASIC_FUNCTIONS_DECL_b67e9418e158d5726b6a54d446b816264c747116_H
 
 typedef enum zend_enum_SortDirection {
 	ZEND_ENUM_SortDirection_Ascending = 1,
@@ -20,10 +20,4 @@ typedef enum zend_enum_RoundingMode {
 	ZEND_ENUM_RoundingMode_PositiveInfinity = 8,
 } zend_enum_RoundingMode;
 
-typedef enum zend_enum_StreamHookResult {
-	ZEND_ENUM_StreamHookResult_Error = 1,
-	ZEND_ENUM_StreamHookResult_Timeout = 2,
-	ZEND_ENUM_StreamHookResult_Ready = 3,
-} zend_enum_StreamHookResult;
-
-#endif /* ZEND_BASIC_FUNCTIONS_DECL_fa310cb1037575669fa3546aeef4cded171bc0f6_H */
+#endif /* ZEND_BASIC_FUNCTIONS_DECL_b67e9418e158d5726b6a54d446b816264c747116_H */
