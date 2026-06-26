@@ -377,6 +377,12 @@ fprintf(stderr, "stream_free: %s:%p[%s] preserve_handle=%d release_cast=%d remov
 			php_io_poll_stream_notify_close(stream);
 		}
 
+		if (stream->weak_poll_handle) {
+			zend_object *handle_obj = stream->weak_poll_handle;
+			stream->weak_poll_handle = NULL;
+			php_stream_poll_weak_handle_notify(handle_obj);
+		}
+
 		ret = stream->ops->close(stream, preserve_handle ? 0 : 1);
 		if (!ret) {
 			ret = flush_result;
@@ -394,6 +400,12 @@ fprintf(stderr, "stream_free: %s:%p[%s] preserve_handle=%d release_cast=%d remov
 	if (close_options & PHP_STREAM_FREE_RELEASE_STREAM) {
 		if (stream->poll_watchers) {
 			php_io_poll_stream_notify_close(stream);
+		}
+
+		if (stream->weak_poll_handle) {
+			zend_object *handle_obj = stream->weak_poll_handle;
+			stream->weak_poll_handle = NULL;
+			php_stream_poll_weak_handle_notify(handle_obj);
 		}
 
 		while (stream->readfilters.head) {
