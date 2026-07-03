@@ -424,10 +424,8 @@ PHP_RINIT_FUNCTION(basic) /* {{{ */
 	/* Default to global filters only */
 	FG(stream_filters) = NULL;
 
-	ZVAL_UNDEF(&FG(io_hooks));
-	FG(io_hooks_poll_fcc) = empty_fcall_info_cache;
-	FG(io_hooks_pollMulti_fcc) = empty_fcall_info_cache;
-	FG(io_hooks_sleep_fcc) = empty_fcall_info_cache;
+	memset(&FG(io_hooks), 0, sizeof(FG(io_hooks)));
+	FG(io_hooks_data) = NULL;
 
 	return SUCCESS;
 }
@@ -490,13 +488,7 @@ PHP_RSHUTDOWN_FUNCTION(basic) /* {{{ */
 	BG(page_uid) = -1;
 	BG(page_gid) = -1;
 
-	if (!Z_ISUNDEF(FG(io_hooks))) {
-		zval_ptr_dtor(&FG(io_hooks));
-		ZVAL_UNDEF(&FG(io_hooks));
-		zend_fcc_dtor(&FG(io_hooks_poll_fcc));
-		zend_fcc_dtor(&FG(io_hooks_pollMulti_fcc));
-		zend_fcc_dtor(&FG(io_hooks_sleep_fcc));
-	}
+	php_set_io_hooks(NULL, 0, NULL);
 
 	return SUCCESS;
 }
@@ -1152,7 +1144,7 @@ PHP_FUNCTION(sleep)
 		RETURN_THROWS();
 	}
 
-	if (PHP_HAS_IO_SLEEP_HOOK()) {
+	if (FG(io_hooks).sleep) {
 		php_io_hooks_sleep(num, 0);
 		RETURN_LONG(0);
 	}
@@ -1176,7 +1168,7 @@ PHP_FUNCTION(usleep)
 	}
 
 #ifdef HAVE_USLEEP
-	if (PHP_HAS_IO_SLEEP_HOOK()) {
+	if (FG(io_hooks).sleep) {
 		php_io_hooks_sleep(num / 1000000LL, (num % 1000000LL) * 1000LL);
 		return;
 	}
@@ -1206,7 +1198,7 @@ PHP_FUNCTION(time_nanosleep)
 		RETURN_THROWS();
 	}
 
-	if (PHP_HAS_IO_SLEEP_HOOK()) {
+	if (FG(io_hooks).sleep) {
 		php_io_hooks_sleep(tv_sec, tv_nsec);
 		RETURN_TRUE;
 	}
@@ -1262,7 +1254,7 @@ PHP_FUNCTION(time_sleep_until)
 
 	diff_ns = target_ns - current_ns;
 
-	if (PHP_HAS_IO_SLEEP_HOOK()) {
+	if (FG(io_hooks).sleep) {
 		php_io_hooks_sleep((zend_long)(diff_ns / ns_per_sec), (zend_long)(diff_ns % ns_per_sec));
 		RETURN_TRUE;
 	}
