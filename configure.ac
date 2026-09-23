@@ -1718,7 +1718,7 @@ PHP_ADD_SOURCES([main/poll], m4_normalize([
   ]),
   [-DZEND_ENABLE_STATIC_TSRMLS_CACHE=1])
 
-PHP_ADD_SOURCES([main/hooks], [io_hooks.c],
+PHP_ADD_SOURCES([main/hooks], [io_hooks.c io_queue_poll.c],
   [-DZEND_ENABLE_STATIC_TSRMLS_CACHE=1])
 
 PHP_ADD_SOURCES([main/streams], m4_normalize([

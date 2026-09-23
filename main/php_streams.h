@@ -191,10 +191,10 @@ struct _php_stream_wrapper	{
 
 #define PHP_STREAM_FLAG_NO_IO						0x400
 
-/* Set while the stream is being polled via the io hook (poll/poll_multi).
+/* Set while an operation on the stream is in flight (main/hooks/io_hooks.h).
  * Any attempt to use the stream as a parameter during this window is a
- * concurrent-access bug and will throw an Error. */
-#define PHP_STREAM_FLAG_BEING_POLLED				0x800
+ * concurrent-access bug and throws an Error. */
+#define PHP_STREAM_FLAG_IN_USE						0x800
 
 #define PHP_STREAM_FLAG_WAS_WRITTEN					0x80000000
 
@@ -320,7 +320,7 @@ static zend_always_inline bool php_stream_zend_parse_arg_into_stream(
 		 * as we want to be able to specify the argument number in the type error */
 		if (EXPECTED(res->type == php_file_le_stream() || res->type == php_file_le_pstream())) {
 			*destination_stream_ptr = (php_stream*)res->ptr;
-			if (UNEXPECTED((*destination_stream_ptr)->flags & PHP_STREAM_FLAG_BEING_POLLED)) {
+			if (UNEXPECTED((*destination_stream_ptr)->flags & PHP_STREAM_FLAG_IN_USE)) {
 				zend_throw_error(NULL, "Concurrent access to a stream");
 				return false;
 			}

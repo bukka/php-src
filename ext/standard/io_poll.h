@@ -16,16 +16,19 @@
 #define PHP_IO_POLL_H
 
 #include "php_streams.h"
+#include "main/php_poll.h"
 
 BEGIN_EXTERN_C()
 
 PHPAPI void php_io_poll_stream_notify_close(php_stream *stream);
 
+PHPAPI extern zend_class_entry *php_io_exception_class_entry;
 PHPAPI extern zend_class_entry *php_io_poll_event_class_entry;
 PHPAPI extern zend_class_entry *php_io_poll_handle_class_entry;
 PHPAPI extern zend_class_entry *php_stream_poll_handle_class_entry;
 
 PHPAPI zend_result php_io_poll_events_to_event_enums(uint32_t events, zval *event_enums);
+PHPAPI void php_io_poll_throw_failed_wait(const char *message, php_poll_error error);
 PHPAPI uint32_t php_io_poll_event_enums_to_events(zval *event_enums);
 
 PHPAPI void php_stream_poll_handle_from_stream(zval *dest, php_stream *stream);
