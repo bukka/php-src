@@ -762,6 +762,21 @@ AS_VAR_IF([php_cv_have__asm_goto], [yes],
     [Define to 1 if asm goto support is available.])])
 
 dnl Check Valgrind support.
+PHP_ARG_WITH([ior],
+  [for ior support],
+  [AS_HELP_STRING([--with-ior],
+    [Build the IO ring on the ior library, found through pkg-config])],
+  [no],
+  [no])
+AS_VAR_IF([PHP_IOR], [no],, [
+  PKG_CHECK_MODULES([IOR], [ior])
+  IOR_LIBS=$($PKG_CONFIG --static --libs ior)
+  PHP_EVAL_INCLINE([$IOR_CFLAGS])
+  PHP_EVAL_LIBLINE([$IOR_LIBS])
+  AC_DEFINE([HAVE_IOR], [1], [Define to 1 if the ior library is available.])
+  PHP_ADD_SOURCES([main/ring], [php_io_ring.c],
+    [-DZEND_ENABLE_STATIC_TSRMLS_CACHE=1])
+
 PHP_ARG_WITH([valgrind],
   [whether to enable Valgrind support],
   [AS_HELP_STRING([--with-valgrind],
@@ -1720,6 +1735,8 @@ PHP_ADD_SOURCES([main/poll], m4_normalize([
 
 PHP_ADD_SOURCES([main/hooks], [io_hooks.c io_queue_poll.c],
   [-DZEND_ENABLE_STATIC_TSRMLS_CACHE=1])
+
+])
 
 PHP_ADD_SOURCES([main/streams], m4_normalize([
     cast.c
