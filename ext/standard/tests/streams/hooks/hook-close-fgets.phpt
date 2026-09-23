@@ -1,25 +1,20 @@
 --TEST--
-Stream hook: fclose() in poll() throws concurrent access error
+IO hooks: fclose() from run() throws the concurrent access error
 --FILE--
 <?php
-
-use Io\Hooks\{Hooks, PollInfo, PollResult};
 
 $server = stream_socket_server('tcp://127.0.0.1:0');
 $addr = stream_socket_get_name($server, false);
 $client = stream_socket_client("tcp://$addr");
 
-class CloseOnceHooks implements Hooks {
-    public function poll(PollInfo $info): PollResult {
-        fclose($info->handle->getStream());
-        $result = new PollResult();
-        $result->handle = $info->handle;
-        $result->events = $info->events;
-        $result->timeout = false;
-        return $result;
+class CloseOnceHooks implements Io\Hooks\Hooks {
+    public function getCapabilities(): array { return []; }
+    public function run(Io\Operation $op): Io\Completion {
+        fclose($op->getHandle()->getStream());
+        return $op->completeReady($op->getEvents());
     }
-    public function pollMulti(?int $timeout_ms, PollInfo ...$info): ?PollResult { throw new \Exception("pollMulti not implemented"); }
-    public function sleep(int $seconds, int $nanoseconds): void { throw new \Exception("sleep not implemented"); }
+    public function add(Io\Operation $op): void {}
+    public function remove(Io\Operation $op): void {}
 }
 
 Io\Hooks\set_hooks(new CloseOnceHooks());

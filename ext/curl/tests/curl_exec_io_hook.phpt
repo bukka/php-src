@@ -16,7 +16,7 @@ function go(callable $fn): void
     $scheduler->go($fn);
 }
 
-$scheduler->run(function () {
+$scheduler->spawn(function () {
     $server = stream_socket_server('tcp://127.0.0.1:0');
     $addr = stream_socket_get_name($server, false);
 
@@ -45,6 +45,7 @@ $scheduler->run(function () {
         }
     });
 });
+$scheduler->loop();
 
 ?>
 --EXPECT--

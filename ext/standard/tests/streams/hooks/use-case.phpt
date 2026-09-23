@@ -14,7 +14,7 @@ function go(callable $fn): void
     $scheduler->go($fn);
 }
 
-$scheduler->run(function () {
+$scheduler->spawn(function () {
     $server = stream_socket_server('tcp://localhost:0');
     $socket_name = stream_socket_get_name($server, false);
     if (!preg_match('/:(\d+)$/', $socket_name, $m)) {
@@ -55,6 +55,7 @@ $scheduler->run(function () {
         }
     });
 });
+$scheduler->loop();
 
 ?>
 --EXPECT--

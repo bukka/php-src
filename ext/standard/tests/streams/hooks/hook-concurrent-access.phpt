@@ -1,36 +1,44 @@
 --TEST--
-Stream hook: concurrent stream access is rejected
+IO hooks: concurrent stream access from run() is rejected
 --FILE--
 <?php
-
-use Io\Hooks\{Hooks, PollInfo, PollResult};
 
 $server = stream_socket_server('tcp://127.0.0.1:0');
 $addr = stream_socket_get_name($server, false);
 $client = stream_socket_client("tcp://$addr");
 
-class ConcurrentHook implements Hooks {
-    public function poll(PollInfo $info): PollResult {
+class ConcurrentHook implements Io\Hooks\Hooks {
+    public function getCapabilities(): array { return []; }
+    public function run(Io\Operation $op): Io\Completion {
         try {
-            fgets($info->handle->getStream());
+            fgets($op->getHandle()->getStream());
         } catch (Error $e) {
             echo $e->getMessage() . "\n";
         }
-        $result = new PollResult();
-        $result->handle = $info->handle;
-        $result->events = $info->events;
-        $result->timeout = false;
-        return $result;
+        var_dump($op instanceof Io\Operation\Poll, $op->getEvents(), $op->getTimeout());
+        return $op->complete(Io\CompletionStatus::Timeout);
     }
-    public function pollMulti(?int $timeout_ms, PollInfo ...$info): ?PollResult {
-        throw new \Exception("pollMulti not implemented");
-    }
-    public function sleep(int $seconds, int $nanoseconds): void { throw new \Exception("sleep not implemented"); }
+    public function add(Io\Operation $op): void {}
+    public function remove(Io\Operation $op): void {}
 }
 
 Io\Hooks\set_hooks(new ConcurrentHook());
+stream_set_timeout($client, 3);
 var_dump(fgets($client));
+var_dump(stream_get_meta_data($client)['timed_out']);
 ?>
---EXPECT--
+--EXPECTF--
 Concurrent access to a stream
+bool(true)
+array(1) {
+  [0]=>
+  enum(Io\Poll\Event::Read)
+}
+object(Time\Duration)#%d (%d) {
+  ["seconds"]=>
+  int(%d)
+  ["nanoseconds"]=>
+  int(%d)
+%A}
 bool(false)
+bool(true)
