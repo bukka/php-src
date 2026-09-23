@@ -115,9 +115,9 @@ typedef struct {
 	zval private_data;
 	/* CurlShareHandle object set using CURLOPT_SHARE. */
 	struct _php_curlsh *share;
-	/* Socket/timer state during curl_exec (NULL outside exec) */
-	HashTable *io_sockets;        /* curl_socket_t -> int events */
-	HashTable *io_socket_handles; /* curl_socket_t -> zend_object* (SocketWeakHandle, no refcount) */
+	/* The sockets libcurl wants watched, kept by the socket callback */
+	HashTable *io_sockets;        /* curl_socket_t -> php_curl_socket_entry */
+	struct _php_curl_socket_entry *io_removed; /* entries libcurl removed, released by the reconcile step */
 	long io_timer_ms;        /* timer value from TIMERFUNCTION, -1 = disabled */
 	CURLM *multi;            /* private multi handle driving curl_exec(), created on first use */
 	zend_object                   std;
