@@ -76,6 +76,7 @@ ZEND_API extern clockid_t zend_hrtime_posix_clock_id;
 
 #endif
 
+#define ZEND_HRTIME_T_MAX UINT64_MAX
 #define ZEND_NANO_IN_SEC UINT64_C(1000000000)
 
 typedef uint64_t zend_hrtime_t;
