@@ -64,6 +64,7 @@
 #endif
 
 #include "ext/standard/file.h"
+#include "main/hooks/io_hooks.h"
 
 #ifdef PHP_WIN32
 # include "win32/time.h"
@@ -858,23 +859,31 @@ PHPAPI php_socket_t php_network_accept_incoming_ex(php_stream *stream,
 	if (clisock == SOCK_ERR) {
 		error = php_socket_errno();
 		if (PHP_IS_TRANSIENT_ERROR(error)) {
-			php_pollstream_result result;
-			do {
-				result = php_pollstream_for(stream, srvsock, PHP_POLLREADABLE, timeout);
-				if (result == PHP_POLLSTREAM_TIMEOUT) {
+			php_deadline deadline;
+			php_deadline_init(&deadline, timeout);
+
+			for (;;) {
+				int n = php_io_poll(stream, srvsock, PHP_POLL_READ, &deadline);
+				if (n == 0) {
 					error = PHP_TIMEOUT_ERROR_VALUE;
 					break;
 				}
-				if (result == PHP_POLLSTREAM_READY) {
-					sl = sizeof(sa);
-					clisock = accept(srvsock, (struct sockaddr*)&sa, &sl);
-					if (clisock == SOCK_ERR) {
-						error = php_socket_errno();
-					}
+				if (n < 0) {
+					error = php_socket_errno();
+					break;
+				}
+				sl = sizeof(sa);
+				clisock = accept(srvsock, (struct sockaddr*)&sa, &sl);
+				if (clisock != SOCK_ERR) {
+					error = 0;
 					break;
 				}
 				error = php_socket_errno();
-			} while (error == EINTR);
+				if (!PHP_IS_TRANSIENT_ERROR(error)) {
+					break;
+				}
+				/* Another acceptor took it: wait again with the remaining time */
+			}
 		}
 	}
 

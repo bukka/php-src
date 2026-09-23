@@ -14,6 +14,7 @@
 
 #include "php.h"
 #include "ext/standard/file.h"
+#include "main/hooks/io_hooks.h"
 #include "php_streams.h"
 #include "php_io.h"
 
@@ -77,6 +78,10 @@ static ssize_t php_sockop_write(php_stream *stream, const char *buf, size_t coun
 	else
 		ptimeout = &sock->timeout;
 
+	/* Computed once, so retries after a wait continue with the remaining time */
+	php_deadline deadline;
+	bool have_deadline = false;
+
 retry:
 	didwrite = send(sock->socket, buf, XP_SOCK_BUF_SIZE(count), 0);
 
@@ -88,20 +93,20 @@ retry:
 			if (sock->is_blocked) {
 				sock->timeout_event = false;
 
-				do {
-					int retval = php_pollstream_for(stream, sock->socket, POLLOUT, ptimeout);
+				if (!have_deadline) {
+					php_deadline_init(&deadline, ptimeout);
+					have_deadline = true;
+				}
 
-					if (retval == PHP_POLLSTREAM_READY) {
-						goto retry;
-					}
-
-					if (retval == PHP_POLLSTREAM_TIMEOUT) {
-						sock->timeout_event = true;
-						break;
-					}
-
+				int n = php_io_poll(stream, sock->socket, PHP_POLL_WRITE, &deadline);
+				if (n > 0) {
+					goto retry;
+				}
+				if (n == 0) {
+					sock->timeout_event = true;
+				} else {
 					err = php_socket_errno();
-				} while (err == EINTR);
+				}
 			} else {
 				/* EWOULDBLOCK/EAGAIN is not an error for a non-blocking stream.
 				 * Report zero byte write instead. */
@@ -109,7 +114,7 @@ retry:
 			}
 		}
 
-		if (!(stream->flags & PHP_STREAM_FLAG_SUPPRESS_ERRORS)) {
+		if (!(stream->flags & PHP_STREAM_FLAG_SUPPRESS_ERRORS) && !EG(exception)) {
 			estr = php_socket_strerror(err, NULL, 0);
 			php_stream_warn(stream, NetworkSendFailed,
 					"Send of %zu bytes failed with errno=%d %s", count, err, estr);
@@ -140,37 +145,32 @@ static ssize_t php_sockop_read(php_stream *stream, char *buf, size_t count)
 	if (nr_bytes < 0 && PHP_IS_TRANSIENT_ERROR(err) && sock->is_blocked) {
 		bool has_buffered_data = stream->has_buffered_data;
 
-		struct timeval zero_timeout = {0, 0};
-		struct timeval *ptimeout;
+		/* With data already buffered, only check whether more is there */
+		php_deadline deadline;
 		if (has_buffered_data) {
-			ptimeout = &zero_timeout;
-		} else if (sock->timeout.tv_sec == -1) {
-			ptimeout = NULL;
+			php_deadline_init_nonblock(&deadline);
 		} else {
-			ptimeout = &sock->timeout;
+			php_deadline_init(&deadline, sock->timeout.tv_sec == -1 ? NULL : &sock->timeout);
 		}
 
-		int retval;
-		do {
-			retval = php_pollstream_for(stream, sock->socket, PHP_POLLREADABLE, ptimeout);
+		for (;;) {
+			int n = php_io_poll(stream, sock->socket, PHP_POLL_READ, &deadline);
 
-			if (retval == PHP_POLLSTREAM_TIMEOUT) {
+			if (n == 0) {
 				sock->timeout_event = true;
+				return has_buffered_data ? 0 : -1;
+			}
+			if (n < 0) {
+				err = php_socket_errno();
 				break;
 			}
 
-			if (retval == PHP_POLLSTREAM_READY) {
-				break;
-			}
-		} while (php_socket_errno() == EINTR);
-
-		if (sock->timeout_event) {
-			return has_buffered_data ? 0 : -1;
-		}
-
-		if (retval == PHP_POLLSTREAM_READY) {
 			nr_bytes = recv(sock->socket, buf, XP_SOCK_BUF_SIZE(count), 0);
 			err = php_socket_errno();
+			if (nr_bytes >= 0 || !PHP_IS_TRANSIENT_ERROR(err)) {
+				break;
+			}
+			/* Spurious wakeup: wait again with the remaining time */
 		}
 	}
 
@@ -195,9 +195,6 @@ static ssize_t php_sockop_read(php_stream *stream, char *buf, size_t count)
 static int php_sockop_close(php_stream *stream, int close_handle)
 {
 	php_netstream_data_t *sock = (php_netstream_data_t*)stream->abstract;
-#ifdef PHP_WIN32
-	int n;
-#endif
 
 	if (!sock) {
 		return 0;
@@ -220,9 +217,8 @@ static int php_sockop_close(php_stream *stream, int close_handle)
 			 * We use a small timeout which should encourage the OS to send the data,
 			 * but at the same time avoid hanging indefinitely.
 			 * */
-			do {
-				n = php_pollfd_for_ms(sock->socket, POLLOUT, 500);
-			} while (n == -1 && php_socket_errno() == EINTR);
+			php_deadline deadline = php_io_deadline_from_ms(500);
+			php_io_poll(NULL, sock->socket, PHP_POLL_WRITE, &deadline);
 #endif
 			closesocket(sock->socket);
 			sock->socket = SOCK_ERR;
@@ -348,7 +344,7 @@ static int php_sockop_set_option(php_stream *stream, int option, int value, void
 						!(stream->flags & PHP_STREAM_FLAG_NO_IO) &&
 						((MSG_DONTWAIT != 0) || !sock->is_blocked)
 					) ||
-					php_pollstream_for(stream, sock->socket, PHP_POLLREADABLE|POLLPRI, &tv) == PHP_POLLSTREAM_READY
+					php_io_poll_tv(stream, sock->socket, PHP_POLL_READ, &tv) > 0
 				) {
 					/* the poll() call was skipped if the socket is non-blocking (or MSG_DONTWAIT is available) and if the timeout is zero */
 #ifdef PHP_WIN32

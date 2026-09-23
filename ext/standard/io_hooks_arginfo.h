@@ -1,92 +1,324 @@
 /* This is a generated file, edit io_hooks.stub.php instead.
- * Stub hash: a6d4bd83077f52bcb197cd2934450a8490a74c80 */
+ * Stub hash: 199c2889120bc17143d95a033bdb8c1df5f5b10e
+ * Has decl header: yes */
+
+#include "zend_enum.h"
 
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_Io_Hooks_set_hooks, 0, 1, Io\\Hooks\\Hooks, 1)
 	ZEND_ARG_OBJ_INFO(0, hooks, Io\\Hooks\\Hooks, 1)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Io_Hooks_Hooks_poll, 0, 1, Io\\Hooks\\PollResult, 0)
-	ZEND_ARG_OBJ_INFO(0, info, Io\\Hooks\\PollInfo, 0)
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_Io_Hooks_get_hooks, 0, 0, Io\\Hooks\\Hooks, 1)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Io_Hooks_Hooks_pollMulti, 0, 1, Io\\Hooks\\PollResult, 1)
-	ZEND_ARG_TYPE_INFO(0, timeout_ms, IS_LONG, 1)
-	ZEND_ARG_VARIADIC_OBJ_INFO(0, info, Io\\Hooks\\PollInfo, 0)
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_Io_Hooks_is_active, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Io_Hooks_Hooks_sleep, 0, 2, IS_VOID, 0)
-	ZEND_ARG_TYPE_INFO(0, seconds, IS_LONG, 0)
-	ZEND_ARG_TYPE_INFO(0, nanoseconds, IS_LONG, 0)
+ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Io_Operation___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Io_Operation_getHandle, 0, 0, Io\\Poll\\Handle, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Io_Operation_getEvents, 0, 0, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Io_Operation_getTimeout, 0, 0, Time\\Duration, 1)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_Io_Operation_isValid arginfo_Io_Hooks_is_active
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Io_Operation_complete, 0, 1, Io\\Completion, 0)
+	ZEND_ARG_OBJ_INFO(0, status, Io\\CompletionStatus, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, result, IS_LONG, 0, "0")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, error, IS_LONG, 0, "0")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Io_Operation_completeReady, 0, 1, Io\\Completion, 0)
+	ZEND_ARG_TYPE_INFO(0, events, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_Io_Completion___construct arginfo_class_Io_Operation___construct
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Io_Completion_getOperation, 0, 0, Io\\Operation, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Io_Completion_getStatus, 0, 0, Io\\CompletionStatus, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Io_Completion_getResult, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_Io_Completion_getEvents arginfo_class_Io_Operation_getEvents
+
+#define arginfo_class_Io_Completion_getError arginfo_class_Io_Completion_getResult
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Io_Completion_getData, 0, 0, IS_MIXED, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_Io_Completion_getCompletions arginfo_class_Io_Operation_getEvents
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Io_OperationQueue_submit, 0, 1, IS_VOID, 0)
+	ZEND_ARG_OBJ_INFO(0, op, Io\\Operation, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, data, IS_MIXED, 0, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Io_OperationQueue_cancel, 0, 1, IS_VOID, 0)
+	ZEND_ARG_OBJ_INFO(0, op, Io\\Operation, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_Io_OperationQueue_add arginfo_class_Io_OperationQueue_cancel
+
+#define arginfo_class_Io_OperationQueue_remove arginfo_class_Io_OperationQueue_cancel
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Io_OperationQueue_waitCompletions, 0, 0, IS_ARRAY, 0)
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, Time\\Duration, 1, "null")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, max, IS_LONG, 1, "null")
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_Io_OperationQueue_countPending arginfo_class_Io_Completion_getResult
+
+#define arginfo_class_Io_OperationQueue_getHookCapabilities arginfo_class_Io_Operation_getEvents
+
+#define arginfo_class_Io_Operation_Poll_isPersistent arginfo_Io_Hooks_is_active
+
+#define arginfo_class_Io_Operation_Any_getOperations arginfo_class_Io_Operation_getEvents
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Io_Operation_Any_completeWith, 0, 1, Io\\Completion, 0)
+	ZEND_ARG_TYPE_INFO(0, completions, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Io_Poll_OperationQueue___construct, 0, 0, 0)
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, context, Io\\Poll\\Context, 1, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Io_Poll_OperationQueue_getContext, 0, 0, Io\\Poll\\Context, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_Io_Poll_OperationQueue_submit arginfo_class_Io_OperationQueue_submit
+
+#define arginfo_class_Io_Poll_OperationQueue_cancel arginfo_class_Io_OperationQueue_cancel
+
+#define arginfo_class_Io_Poll_OperationQueue_add arginfo_class_Io_OperationQueue_cancel
+
+#define arginfo_class_Io_Poll_OperationQueue_remove arginfo_class_Io_OperationQueue_cancel
+
+#define arginfo_class_Io_Poll_OperationQueue_waitCompletions arginfo_class_Io_OperationQueue_waitCompletions
+
+#define arginfo_class_Io_Poll_OperationQueue_countPending arginfo_class_Io_Completion_getResult
+
+#define arginfo_class_Io_Poll_OperationQueue_getHookCapabilities arginfo_class_Io_Operation_getEvents
+
+#define arginfo_class_Io_Hooks_Hooks_getCapabilities arginfo_class_Io_Operation_getEvents
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Io_Hooks_Hooks_run, 0, 1, Io\\Completion, 0)
+	ZEND_ARG_OBJ_INFO(0, op, Io\\Operation, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_Io_Hooks_Hooks_add arginfo_class_Io_OperationQueue_cancel
+
+#define arginfo_class_Io_Hooks_Hooks_remove arginfo_class_Io_OperationQueue_cancel
 
 ZEND_FUNCTION(Io_Hooks_set_hooks);
+ZEND_FUNCTION(Io_Hooks_get_hooks);
+ZEND_FUNCTION(Io_Hooks_is_active);
+ZEND_METHOD(Io_Operation, __construct);
+ZEND_METHOD(Io_Operation, getHandle);
+ZEND_METHOD(Io_Operation, getEvents);
+ZEND_METHOD(Io_Operation, getTimeout);
+ZEND_METHOD(Io_Operation, isValid);
+ZEND_METHOD(Io_Operation, complete);
+ZEND_METHOD(Io_Operation, completeReady);
+ZEND_METHOD(Io_Completion, __construct);
+ZEND_METHOD(Io_Completion, getOperation);
+ZEND_METHOD(Io_Completion, getStatus);
+ZEND_METHOD(Io_Completion, getResult);
+ZEND_METHOD(Io_Completion, getEvents);
+ZEND_METHOD(Io_Completion, getError);
+ZEND_METHOD(Io_Completion, getData);
+ZEND_METHOD(Io_Completion, getCompletions);
+ZEND_METHOD(Io_Operation_Poll, isPersistent);
+ZEND_METHOD(Io_Operation_Any, getOperations);
+ZEND_METHOD(Io_Operation_Any, completeWith);
+ZEND_METHOD(Io_Poll_OperationQueue, __construct);
+ZEND_METHOD(Io_Poll_OperationQueue, getContext);
+ZEND_METHOD(Io_Poll_OperationQueue, submit);
+ZEND_METHOD(Io_Poll_OperationQueue, cancel);
+ZEND_METHOD(Io_Poll_OperationQueue, add);
+ZEND_METHOD(Io_Poll_OperationQueue, remove);
+ZEND_METHOD(Io_Poll_OperationQueue, waitCompletions);
+ZEND_METHOD(Io_Poll_OperationQueue, countPending);
+ZEND_METHOD(Io_Poll_OperationQueue, getHookCapabilities);
 
 static const zend_function_entry ext_functions[] = {
 	ZEND_RAW_FENTRY(ZEND_NS_NAME("Io\\Hooks", "set_hooks"), zif_Io_Hooks_set_hooks, arginfo_Io_Hooks_set_hooks, 0, NULL, NULL)
+	ZEND_RAW_FENTRY(ZEND_NS_NAME("Io\\Hooks", "get_hooks"), zif_Io_Hooks_get_hooks, arginfo_Io_Hooks_get_hooks, 0, NULL, NULL)
+	ZEND_RAW_FENTRY(ZEND_NS_NAME("Io\\Hooks", "is_active"), zif_Io_Hooks_is_active, arginfo_Io_Hooks_is_active, 0, NULL, NULL)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_Io_Operation_methods[] = {
+	ZEND_ME(Io_Operation, __construct, arginfo_class_Io_Operation___construct, ZEND_ACC_PRIVATE)
+	ZEND_ME(Io_Operation, getHandle, arginfo_class_Io_Operation_getHandle, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Operation, getEvents, arginfo_class_Io_Operation_getEvents, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Operation, getTimeout, arginfo_class_Io_Operation_getTimeout, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Operation, isValid, arginfo_class_Io_Operation_isValid, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Operation, complete, arginfo_class_Io_Operation_complete, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Operation, completeReady, arginfo_class_Io_Operation_completeReady, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_Io_Completion_methods[] = {
+	ZEND_ME(Io_Completion, __construct, arginfo_class_Io_Completion___construct, ZEND_ACC_PRIVATE)
+	ZEND_ME(Io_Completion, getOperation, arginfo_class_Io_Completion_getOperation, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Completion, getStatus, arginfo_class_Io_Completion_getStatus, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Completion, getResult, arginfo_class_Io_Completion_getResult, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Completion, getEvents, arginfo_class_Io_Completion_getEvents, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Completion, getError, arginfo_class_Io_Completion_getError, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Completion, getData, arginfo_class_Io_Completion_getData, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Completion, getCompletions, arginfo_class_Io_Completion_getCompletions, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_Io_OperationQueue_methods[] = {
+	ZEND_RAW_FENTRY("submit", NULL, arginfo_class_Io_OperationQueue_submit, ZEND_ACC_PUBLIC|ZEND_ACC_ABSTRACT, NULL, NULL)
+	ZEND_RAW_FENTRY("cancel", NULL, arginfo_class_Io_OperationQueue_cancel, ZEND_ACC_PUBLIC|ZEND_ACC_ABSTRACT, NULL, NULL)
+	ZEND_RAW_FENTRY("add", NULL, arginfo_class_Io_OperationQueue_add, ZEND_ACC_PUBLIC|ZEND_ACC_ABSTRACT, NULL, NULL)
+	ZEND_RAW_FENTRY("remove", NULL, arginfo_class_Io_OperationQueue_remove, ZEND_ACC_PUBLIC|ZEND_ACC_ABSTRACT, NULL, NULL)
+	ZEND_RAW_FENTRY("waitCompletions", NULL, arginfo_class_Io_OperationQueue_waitCompletions, ZEND_ACC_PUBLIC|ZEND_ACC_ABSTRACT, NULL, NULL)
+	ZEND_RAW_FENTRY("countPending", NULL, arginfo_class_Io_OperationQueue_countPending, ZEND_ACC_PUBLIC|ZEND_ACC_ABSTRACT, NULL, NULL)
+	ZEND_RAW_FENTRY("getHookCapabilities", NULL, arginfo_class_Io_OperationQueue_getHookCapabilities, ZEND_ACC_PUBLIC|ZEND_ACC_ABSTRACT, NULL, NULL)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_Io_Operation_Poll_methods[] = {
+	ZEND_ME(Io_Operation_Poll, isPersistent, arginfo_class_Io_Operation_Poll_isPersistent, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_Io_Operation_Any_methods[] = {
+	ZEND_ME(Io_Operation_Any, getOperations, arginfo_class_Io_Operation_Any_getOperations, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Operation_Any, completeWith, arginfo_class_Io_Operation_Any_completeWith, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_Io_Poll_OperationQueue_methods[] = {
+	ZEND_ME(Io_Poll_OperationQueue, __construct, arginfo_class_Io_Poll_OperationQueue___construct, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Poll_OperationQueue, getContext, arginfo_class_Io_Poll_OperationQueue_getContext, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Poll_OperationQueue, submit, arginfo_class_Io_Poll_OperationQueue_submit, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Poll_OperationQueue, cancel, arginfo_class_Io_Poll_OperationQueue_cancel, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Poll_OperationQueue, add, arginfo_class_Io_Poll_OperationQueue_add, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Poll_OperationQueue, remove, arginfo_class_Io_Poll_OperationQueue_remove, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Poll_OperationQueue, waitCompletions, arginfo_class_Io_Poll_OperationQueue_waitCompletions, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Poll_OperationQueue, countPending, arginfo_class_Io_Poll_OperationQueue_countPending, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Poll_OperationQueue, getHookCapabilities, arginfo_class_Io_Poll_OperationQueue_getHookCapabilities, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 
 static const zend_function_entry class_Io_Hooks_Hooks_methods[] = {
-	ZEND_RAW_FENTRY("poll", NULL, arginfo_class_Io_Hooks_Hooks_poll, ZEND_ACC_PUBLIC|ZEND_ACC_ABSTRACT, NULL, NULL)
-	ZEND_RAW_FENTRY("pollMulti", NULL, arginfo_class_Io_Hooks_Hooks_pollMulti, ZEND_ACC_PUBLIC|ZEND_ACC_ABSTRACT, NULL, NULL)
-	ZEND_RAW_FENTRY("sleep", NULL, arginfo_class_Io_Hooks_Hooks_sleep, ZEND_ACC_PUBLIC|ZEND_ACC_ABSTRACT, NULL, NULL)
+	ZEND_RAW_FENTRY("getCapabilities", NULL, arginfo_class_Io_Hooks_Hooks_getCapabilities, ZEND_ACC_PUBLIC|ZEND_ACC_ABSTRACT, NULL, NULL)
+	ZEND_RAW_FENTRY("run", NULL, arginfo_class_Io_Hooks_Hooks_run, ZEND_ACC_PUBLIC|ZEND_ACC_ABSTRACT, NULL, NULL)
+	ZEND_RAW_FENTRY("add", NULL, arginfo_class_Io_Hooks_Hooks_add, ZEND_ACC_PUBLIC|ZEND_ACC_ABSTRACT, NULL, NULL)
+	ZEND_RAW_FENTRY("remove", NULL, arginfo_class_Io_Hooks_Hooks_remove, ZEND_ACC_PUBLIC|ZEND_ACC_ABSTRACT, NULL, NULL)
 	ZEND_FE_END
 };
 
-static zend_class_entry *register_class_Io_Hooks_PollInfo(void)
+static zend_class_entry *register_class_Io_CompletionStatus(void)
 {
-	zend_class_entry ce, *class_entry;
+	zend_class_entry *class_entry = zend_register_internal_enum("Io\\CompletionStatus", IS_UNDEF, NULL);
 
-	INIT_NS_CLASS_ENTRY(ce, "Io\\Hooks", "PollInfo", NULL);
-	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
+	zend_enum_add_case_cstr(class_entry, "Done", NULL);
 
-	zval property_handle_default_value;
-	ZVAL_UNDEF(&property_handle_default_value);
-	zend_string *property_handle_name = zend_string_init("handle", sizeof("handle") - 1, true);
-	zend_string *property_handle_class_Io_Poll_Handle = zend_string_init("Io\\Poll\\Handle", sizeof("Io\\Poll\\Handle")-1, 1);
-	zend_declare_typed_property(class_entry, property_handle_name, &property_handle_default_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_CLASS(property_handle_class_Io_Poll_Handle, 0, 0));
-	zend_string_release_ex(property_handle_name, true);
+	zend_enum_add_case_cstr(class_entry, "Ready", NULL);
 
-	zval property_events_default_value;
-	ZVAL_UNDEF(&property_events_default_value);
-	zend_string *property_events_name = zend_string_init("events", sizeof("events") - 1, true);
-	zend_declare_typed_property(class_entry, property_events_name, &property_events_default_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_ARRAY));
-	zend_string_release_ex(property_events_name, true);
+	zend_enum_add_case_cstr(class_entry, "Timeout", NULL);
 
-	zval property_timeout_ms_default_value;
-	ZVAL_UNDEF(&property_timeout_ms_default_value);
-	zend_string *property_timeout_ms_name = zend_string_init("timeout_ms", sizeof("timeout_ms") - 1, true);
-	zend_declare_typed_property(class_entry, property_timeout_ms_name, &property_timeout_ms_default_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
-	zend_string_release_ex(property_timeout_ms_name, true);
+	zend_enum_add_case_cstr(class_entry, "Interrupted", NULL);
+
+	zend_enum_add_case_cstr(class_entry, "Cancelled", NULL);
+
+	zend_enum_add_case_cstr(class_entry, "Unsupported", NULL);
 
 	return class_entry;
 }
 
-static zend_class_entry *register_class_Io_Hooks_PollResult(void)
+static zend_class_entry *register_class_Io_Operation(void)
 {
 	zend_class_entry ce, *class_entry;
 
-	INIT_NS_CLASS_ENTRY(ce, "Io\\Hooks", "PollResult", NULL);
-	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
+	INIT_NS_CLASS_ENTRY(ce, "Io", "Operation", class_Io_Operation_methods);
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_ABSTRACT|ZEND_ACC_NO_DYNAMIC_PROPERTIES|ZEND_ACC_NOT_SERIALIZABLE);
 
-	zval property_handle_default_value;
-	ZVAL_UNDEF(&property_handle_default_value);
-	zend_string *property_handle_name = zend_string_init("handle", sizeof("handle") - 1, true);
-	zend_string *property_handle_class_Io_Poll_Handle = zend_string_init("Io\\Poll\\Handle", sizeof("Io\\Poll\\Handle")-1, 1);
-	zend_declare_typed_property(class_entry, property_handle_name, &property_handle_default_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_CLASS(property_handle_class_Io_Poll_Handle, 0, 0));
-	zend_string_release_ex(property_handle_name, true);
+	return class_entry;
+}
 
-	zval property_events_default_value;
-	ZVAL_UNDEF(&property_events_default_value);
-	zend_string *property_events_name = zend_string_init("events", sizeof("events") - 1, true);
-	zend_declare_typed_property(class_entry, property_events_name, &property_events_default_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_ARRAY));
-	zend_string_release_ex(property_events_name, true);
+static zend_class_entry *register_class_Io_Completion(void)
+{
+	zend_class_entry ce, *class_entry;
 
-	zval property_timeout_default_value;
-	ZVAL_UNDEF(&property_timeout_default_value);
-	zend_string *property_timeout_name = zend_string_init("timeout", sizeof("timeout") - 1, true);
-	zend_declare_typed_property(class_entry, property_timeout_name, &property_timeout_default_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_BOOL));
-	zend_string_release_ex(property_timeout_name, true);
+	INIT_NS_CLASS_ENTRY(ce, "Io", "Completion", class_Io_Completion_methods);
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES|ZEND_ACC_NOT_SERIALIZABLE);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_Io_InvalidOperationException(zend_class_entry *class_entry_Io_IoException)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "Io", "InvalidOperationException", NULL);
+	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Io_IoException, 0);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_Io_OperationQueue(void)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "Io", "OperationQueue", class_Io_OperationQueue_methods);
+	class_entry = zend_register_internal_interface(&ce);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_Io_Operation_Poll(zend_class_entry *class_entry_Io_Operation)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "Io\\Operation", "Poll", class_Io_Operation_Poll_methods);
+	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Io_Operation, ZEND_ACC_FINAL);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_Io_Operation_Timer(zend_class_entry *class_entry_Io_Operation)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "Io\\Operation", "Timer", NULL);
+	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Io_Operation, ZEND_ACC_FINAL);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_Io_Operation_Any(zend_class_entry *class_entry_Io_Operation)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "Io\\Operation", "Any", class_Io_Operation_Any_methods);
+	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Io_Operation, ZEND_ACC_FINAL);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_Io_Poll_OperationQueue(zend_class_entry *class_entry_Io_OperationQueue)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "Io\\Poll", "OperationQueue", class_Io_Poll_OperationQueue_methods);
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES|ZEND_ACC_NOT_SERIALIZABLE);
+	zend_class_implements(class_entry, 1, class_entry_Io_OperationQueue);
 
 	return class_entry;
 }
@@ -97,6 +329,17 @@ static zend_class_entry *register_class_Io_Hooks_Hooks(void)
 
 	INIT_NS_CLASS_ENTRY(ce, "Io\\Hooks", "Hooks", class_Io_Hooks_Hooks_methods);
 	class_entry = zend_register_internal_interface(&ce);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_Io_Hooks_Capability(void)
+{
+	zend_class_entry *class_entry = zend_register_internal_enum("Io\\Hooks\\Capability", IS_UNDEF, NULL);
+
+	zend_enum_add_case_cstr(class_entry, "Files", NULL);
+
+	zend_enum_add_case_cstr(class_entry, "Direct", NULL);
 
 	return class_entry;
 }

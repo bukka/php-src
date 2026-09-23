@@ -119,6 +119,7 @@ typedef struct {
 	HashTable *io_sockets;        /* curl_socket_t -> int events */
 	HashTable *io_socket_handles; /* curl_socket_t -> zend_object* (SocketWeakHandle, no refcount) */
 	long io_timer_ms;        /* timer value from TIMERFUNCTION, -1 = disabled */
+	CURLM *multi;            /* private multi handle driving curl_exec(), created on first use */
 	zend_object                   std;
 } php_curl;
 

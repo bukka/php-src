@@ -21,6 +21,7 @@
 
 #include "php.h"
 #include "ext/standard/file.h"
+#include "main/hooks/io_hooks.h"
 #include "ext/uri/php_uri.h"
 #include "streams/php_streams_int.h"
 #include "zend_smart_str.h"
@@ -2902,11 +2903,9 @@ static int php_openssl_capture_peer_certs(php_stream *stream,
 
 static zend_result php_openssl_set_blocking(php_openssl_netstream_data_t *sslsock, int block)
 {
-	zend_result result = php_set_sock_blocking(sslsock->s.socket, block);
-	if (EXPECTED(SUCCESS == result)) {
-		sslsock->s.is_blocked = block;
-	}
-	return result;
+	/* The descriptor stays non-blocking; is_blocked selects whether the stream waits */
+	sslsock->s.is_blocked = block;
+	return SUCCESS;
 }
 
 #ifdef HAVE_TLS13
@@ -3077,8 +3076,8 @@ static int php_openssl_enable_crypto(php_stream *stream,
 					if (has_timeout) {
 						left_time = php_openssl_subtract_timeval(*timeout, elapsed_time);
 					}
-					php_pollstream_for(stream, sslsock->s.socket, (err == SSL_ERROR_WANT_READ) ?
-						(POLLIN|POLLPRI) : POLLOUT, has_timeout ? &left_time : NULL);
+					php_io_poll_tv(stream, sslsock->s.socket, (err == SSL_ERROR_WANT_READ) ?
+						PHP_POLL_READ : PHP_POLL_WRITE, has_timeout ? &left_time : NULL);
 				}
 			} else {
 				retry = 0;
@@ -3257,11 +3256,11 @@ static ssize_t php_openssl_sockop_io(int read, php_stream *stream, char *buf, si
 				 */
 				if (retry) {
 					if (read) {
-						php_pollstream_for(stream, sslsock->s.socket, (err == SSL_ERROR_WANT_WRITE) ?
-							(POLLOUT|POLLPRI) : (POLLIN|POLLPRI), has_timeout ? &left_time : NULL);
+						php_io_poll_tv(stream, sslsock->s.socket, (err == SSL_ERROR_WANT_WRITE) ?
+							PHP_POLL_WRITE : PHP_POLL_READ, has_timeout ? &left_time : NULL);
 					} else {
-						php_pollstream_for(stream, sslsock->s.socket, (err == SSL_ERROR_WANT_READ) ?
-							(POLLIN|POLLPRI) : (POLLOUT|POLLPRI), has_timeout ? &left_time : NULL);
+						php_io_poll_tv(stream, sslsock->s.socket, (err == SSL_ERROR_WANT_READ) ?
+							PHP_POLL_READ : PHP_POLL_WRITE, has_timeout ? &left_time : NULL);
 					}
 				}
 			} else {
@@ -3276,11 +3275,11 @@ static ssize_t php_openssl_sockop_io(int read, php_stream *stream, char *buf, si
 				/* Otherwise, we need to wait again (up to time_left or we get an error) */
 				if (began_blocked) {
 					if (read) {
-						php_pollstream_for(stream, sslsock->s.socket, (err == SSL_ERROR_WANT_WRITE) ?
-							(POLLOUT|POLLPRI) : (POLLIN|POLLPRI), has_timeout ? &left_time : NULL);
+						php_io_poll_tv(stream, sslsock->s.socket, (err == SSL_ERROR_WANT_WRITE) ?
+							PHP_POLL_WRITE : PHP_POLL_READ, has_timeout ? &left_time : NULL);
 					} else {
-						php_pollstream_for(stream, sslsock->s.socket, (err == SSL_ERROR_WANT_READ) ?
-							(POLLIN|POLLPRI) : (POLLOUT|POLLPRI), has_timeout ? &left_time : NULL);
+						php_io_poll_tv(stream, sslsock->s.socket, (err == SSL_ERROR_WANT_READ) ?
+							PHP_POLL_READ : PHP_POLL_WRITE, has_timeout ? &left_time : NULL);
 					}
 				} else if (err == SSL_ERROR_WANT_READ) {
 					sslsock->last_status = STREAM_CRYPTO_STATUS_WANT_READ;
@@ -3386,7 +3385,6 @@ static int php_openssl_sockop_close(php_stream *stream, int close_handle) /* {{{
 #endif
 		if (sslsock->s.socket != SOCK_ERR) {
 #ifdef PHP_WIN32
-			php_pollstream_result res;
 			/* prevent more data from coming in */
 			shutdown(sslsock->s.socket, SHUT_RD);
 
@@ -3396,9 +3394,8 @@ static int php_openssl_sockop_close(php_stream *stream, int close_handle) /* {{{
 			 * We use a small timeout which should encourage the OS to send the data,
 			 * but at the same time avoid hanging indefinitely.
 			 * */
-			do {
-				res = php_pollstream_for_ms(stream, sslsock->s.socket, POLLOUT, 500);
-			} while (res == PHP_POLLSTREAM_ERROR && php_socket_errno() == EINTR);
+			php_deadline deadline = php_io_deadline_from_ms(500);
+			php_io_poll(NULL, sslsock->s.socket, PHP_POLL_WRITE, &deadline);
 #endif
 			closesocket(sslsock->s.socket);
 			sslsock->s.socket = SOCK_ERR;
@@ -3522,10 +3519,8 @@ static inline int php_openssl_tcp_sockop_accept(php_stream *stream, php_openssl_
 		memcpy(clisockdata, sock, sizeof(clisockdata->s));
 
 		clisockdata->s.socket = clisock;
-#ifdef __linux__
-		/* O_NONBLOCK is not inherited on Linux */
 		clisockdata->s.is_blocked = true;
-#endif
+		php_set_sock_blocking(clisock, false);
 
 		xparam->outputs.client = php_stream_alloc_rel(stream->ops, clisockdata, NULL, "r+");
 		if (xparam->outputs.client) {
@@ -3673,7 +3668,7 @@ static int php_openssl_sockop_set_option(php_stream *stream, int option, int val
 						!(stream->flags & PHP_STREAM_FLAG_NO_IO) &&
 						((MSG_DONTWAIT != 0) || !sslsock->s.is_blocked)
 					) ||
-					php_pollstream_for(stream, sslsock->s.socket, PHP_POLLREADABLE|POLLPRI, &tv) == PHP_POLLSTREAM_READY
+					php_io_poll_tv(stream, sslsock->s.socket, PHP_POLL_READ, &tv) > 0
 				) {
 					/* the poll() call was skipped if the socket is non-blocking (or MSG_DONTWAIT is available) and if the timeout is zero */
 					/* additionally, we don't use this optimization if SSL is active because in that case, we're not using MSG_DONTWAIT */
@@ -3751,7 +3746,7 @@ static int php_openssl_sockop_set_option(php_stream *stream, int option, int val
 								if (retry) {
 									/* Now, how much time until we time out? */
 									left_time = php_openssl_subtract_timeval(*timeout, elapsed_time);
-									if (php_pollstream_for(stream, sslsock->s.socket, PHP_POLLREADABLE|POLLPRI|POLLOUT, has_timeout ? &left_time : NULL) < PHP_POLLSTREAM_READY) {
+									if (php_io_poll_tv(stream, sslsock->s.socket, PHP_POLL_READ|PHP_POLL_WRITE, has_timeout ? &left_time : NULL) <= 0) {
 										retry = 0;
 										alive = 0;
 									};

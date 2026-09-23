@@ -40,6 +40,7 @@
 #include "ext/standard/io_poll.h"
 #include "ext/standard/io_poll_decl.h"
 #include "main/php_poll.h"
+#include "main/hooks/io_hooks.h"
 #include "curl_private.h"
 #include "curl_socket_handle_arginfo.h"
 
@@ -1176,6 +1177,7 @@ void init_curl_handle(php_curl *ch)
 	ch->io_sockets = NULL;
 	ch->io_socket_handles = NULL;
 	ch->io_timer_ms = -1;
+	ch->multi = NULL;
 }
 
 /* }}} */
@@ -2541,79 +2543,123 @@ static int php_curl_timer_callback(CURLM *multi, long timeout_ms, void *userp)
 static CURLcode php_curl_exec_multi(php_curl *ch)
 {
 	CURLcode result = CURLE_OK;
-	CURLM *multi = curl_multi_init();
-	curl_multi_setopt(multi, CURLMOPT_SOCKETFUNCTION, php_curl_socket_callback);
-	curl_multi_setopt(multi, CURLMOPT_SOCKETDATA,     ch);
+
+	/* The multi handle stays with the easy handle, as curl_easy_perform()
+	 * keeps its private multi, so pooled connections are reused */
+	if (!ch->multi) {
+		ch->multi = curl_multi_init();
+		if (!ch->multi) {
+			return CURLE_OUT_OF_MEMORY;
+		}
+		curl_multi_setopt(ch->multi, CURLMOPT_SOCKETFUNCTION, php_curl_socket_callback);
+		curl_multi_setopt(ch->multi, CURLMOPT_SOCKETDATA,     ch);
+		curl_multi_setopt(ch->multi, CURLMOPT_TIMERFUNCTION,  php_curl_timer_callback);
+		curl_multi_setopt(ch->multi, CURLMOPT_TIMERDATA,      ch);
+	}
+	CURLM *multi = ch->multi;
 	curl_easy_setopt(ch->cp, CURLOPT_CLOSESOCKETFUNCTION, php_curl_close_socket_callback);
 	curl_easy_setopt(ch->cp, CURLOPT_CLOSESOCKETDATA,     ch);
-	curl_multi_setopt(multi, CURLMOPT_TIMERFUNCTION,  php_curl_timer_callback);
-	curl_multi_setopt(multi, CURLMOPT_TIMERDATA,      ch);
 
-	curl_multi_add_handle(multi, ch->cp);
+	CURLMcode mres = curl_multi_add_handle(multi, ch->cp);
+	if (mres != CURLM_OK) {
+		return mres == CURLM_OUT_OF_MEMORY ? CURLE_OUT_OF_MEMORY : CURLE_FAILED_INIT;
+	}
 
 	int still_running;
 	curl_multi_socket_action(multi, CURL_SOCKET_TIMEOUT, 0, &still_running);
 
-	while (still_running) {
-		/* If timer is zero, fire immediately again without waiting */
-		if (ch->io_timer_ms == 0) {
-			curl_multi_socket_action(multi, CURL_SOCKET_TIMEOUT, 0, &still_running);
-			continue;
+	for (;;) {
+		/* The transfer may end inside any socket action, waited for or not */
+		CURLMsg *msg;
+		int msgs_in_queue;
+		bool done = false;
+		while ((msg = curl_multi_info_read(multi, &msgs_in_queue)) != NULL) {
+			if (msg->msg == CURLMSG_DONE && msg->easy_handle == ch->cp) {
+				result = msg->data.result;
+				done = true;
+			}
+		}
+		if (done || !still_running) {
+			break;
 		}
 
-		if (FG(io_hooks).poll_multi) {
-			/* Build php_io_hooks_poll_info[] for all active sockets */
-			uint32_t n = ch->io_sockets ? zend_hash_num_elements(ch->io_sockets) : 0;
-			php_io_hooks_poll_info *infos = n > 0 ? safe_emalloc(n, sizeof(php_io_hooks_poll_info), 0) : NULL;
+		if (php_io_hooks_active()) {
+			/* One Any op per iteration: a Poll member per socket libcurl wants
+			 * watched and a Timer member for its timeout */
+			uint32_t n_sockets = ch->io_sockets ? zend_hash_num_elements(ch->io_sockets) : 0;
+			php_io_op *members = safe_emalloc(n_sockets + 1, sizeof(php_io_op), 0);
+			php_io_op_result *results = safe_emalloc(n_sockets + 1, sizeof(php_io_op_result), 0);
+			zend_object **handles = safe_emalloc(n_sockets + 1, sizeof(zend_object *), 0);
+			uint32_t n_members = 0;
 
-			if (n > 0) {
-				uint32_t i = 0;
+			if (n_sockets > 0) {
 				zend_ulong sock_ulong;
 				zval *events_zv;
 				ZEND_HASH_FOREACH_NUM_KEY_VAL(ch->io_sockets, sock_ulong, events_zv) {
 					zval handle_zv;
 					php_curl_socket_handle_from_fd(ch, &handle_zv, (curl_socket_t)sock_ulong);
-					infos[i].handle = Z_OBJ(handle_zv);
+					handles[n_members] = Z_OBJ(handle_zv);
 					int curl_what = (int)Z_LVAL_P(events_zv);
-					infos[i].events = ((curl_what & CURL_POLL_IN)  ? PHP_POLL_READ  : 0)
+					uint32_t events = ((curl_what & CURL_POLL_IN)  ? PHP_POLL_READ  : 0)
 					                | ((curl_what & CURL_POLL_OUT) ? PHP_POLL_WRITE : 0);
-					infos[i].timeout_ms = -1;
-					i++;
+					php_io_op_poll(&members[n_members], handles[n_members], (php_socket_t)sock_ulong,
+							events, php_io_deadline_infinite());
+					n_members++;
 				} ZEND_HASH_FOREACH_END();
 			}
 
-			php_io_hooks_poll_result *poll_result = FG(io_hooks).poll_multi(
-				FG(io_hooks_data), ch->io_timer_ms, n, infos);
-
-			for (uint32_t i = 0; i < n; i++) {
-				OBJ_RELEASE(infos[i].handle);
+			/* Without sockets and without a timer nothing could wake the loop */
+			long wait_ms = ch->io_timer_ms >= 0 ? ch->io_timer_ms : (n_sockets > 0 ? -1 : 1000);
+			uint32_t timer_index = UINT32_MAX;
+			if (wait_ms >= 0) {
+				timer_index = n_members;
+				php_io_op_timer(&members[n_members], php_io_deadline_from_ms(wait_ms));
+				n_members++;
 			}
-			if (infos) efree(infos);
 
-			if (EG(exception)) {
-				if (poll_result) {
-					if (poll_result->handle) OBJ_RELEASE(poll_result->handle);
-					efree(poll_result);
-				}
+			php_io_op any;
+			php_io_op_result any_result;
+			php_io_op_any(&any, members, n_members, results);
+			zend_result rc = php_io_run(&any, &any_result);
+
+			for (uint32_t i = 0; i < n_sockets; i++) {
+				OBJ_RELEASE(handles[i]);
+			}
+			efree(handles);
+
+			if (rc == FAILURE) {
+				efree(members);
+				efree(results);
 				break;
 			}
 
-			if (poll_result) {
-				/* Drive the ready socket */
-				if (poll_result->handle) {
-					php_poll_handle_object *hobj = PHP_POLL_HANDLE_OBJ_FROM_ZOBJ(poll_result->handle);
-					php_socket_t fd = php_poll_handle_get_fd(hobj);
-					int curl_events = ((poll_result->events & PHP_POLL_READ)  ? CURL_CSELECT_IN  : 0)
-					                | ((poll_result->events & PHP_POLL_WRITE) ? CURL_CSELECT_OUT : 0)
-					                | ((poll_result->events & PHP_POLL_ERROR) ? CURL_CSELECT_ERR : 0);
-					curl_multi_socket_action(multi, (curl_socket_t)fd, curl_events, &still_running);
-					OBJ_RELEASE(poll_result->handle);
+			bool timer_fired = any.u.any.n_results == 0;
+			for (uint32_t i = 0; i < any.u.any.n_results; i++) {
+				uint32_t index = results[i].index;
+				if (index == timer_index) {
+					timer_fired = true;
+					continue;
 				}
-				efree(poll_result);
-			} else {
-				/* NULL = timeout */
+				if (results[i].status != PHP_IO_DONE && results[i].status != PHP_IO_READY) {
+					continue;
+				}
+				curl_socket_t s = (curl_socket_t)members[index].fd;
+				/* An earlier action in this iteration may have removed it */
+				if (!ch->io_sockets || !zend_hash_index_exists(ch->io_sockets, (zend_ulong)s)) {
+					continue;
+				}
+				uint32_t revents = (uint32_t)results[i].res;
+				int curl_events = ((revents & PHP_POLL_READ)  ? CURL_CSELECT_IN  : 0)
+				                | ((revents & PHP_POLL_WRITE) ? CURL_CSELECT_OUT : 0)
+				                | ((revents & (PHP_POLL_ERROR|PHP_POLL_HUP)) ? CURL_CSELECT_ERR : 0);
+				curl_multi_socket_action(multi, s, curl_events, &still_running);
+			}
+			if (timer_fired) {
 				curl_multi_socket_action(multi, CURL_SOCKET_TIMEOUT, 0, &still_running);
 			}
+
+			efree(members);
+			efree(results);
 		} else {
 			/* No hook: select() on the sockets logged by the socket callback */
 			fd_set rfds, wfds, efds;
@@ -2664,20 +2710,9 @@ static CURLcode php_curl_exec_multi(php_curl *ch)
 				curl_multi_socket_action(multi, CURL_SOCKET_TIMEOUT, 0, &still_running);
 			}
 		}
-
-		/* Check for completed messages */
-		CURLMsg *msg;
-		int msgs_in_queue;
-		while ((msg = curl_multi_info_read(multi, &msgs_in_queue)) != NULL) {
-			if (msg->msg == CURLMSG_DONE && msg->easy_handle == ch->cp) {
-				result = msg->data.result;
-				still_running = 0;
-			}
-		}
 	}
 
 	curl_multi_remove_handle(multi, ch->cp);
-	curl_multi_cleanup(multi);
 
 	if (ch->io_sockets) {
 		zend_hash_destroy(ch->io_sockets);
@@ -3136,6 +3171,10 @@ static void curl_free_obj(zend_object *object)
 
 	_php_curl_verify_handlers(ch, /* reporterror */ false);
 
+	if (ch->multi) {
+		curl_multi_cleanup(ch->multi);
+		ch->multi = NULL;
+	}
 	curl_easy_cleanup(ch->cp);
 
 	/* cURL destructors should be invoked only by last curl handle */
