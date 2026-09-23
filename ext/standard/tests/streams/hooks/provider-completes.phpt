@@ -8,33 +8,42 @@ curl
 final class Recorder implements Io\Hooks\Hooks
 {
     public array $seen = [];
+    public int $anyRuns = 0;
+    public bool $membersOk = true;
+    public bool $timerOk = true;
 
     public function getCapabilities(): array { return []; }
 
     public function run(Io\Operation $op): Io\Completion
     {
-        $this->seen[] = $op::class;
+        $this->seen[$op::class] = true;
         if ($op instanceof Io\Operation\Timer) {
-            var_dump($op->getHandle(), $op->getEvents(), $op->getTimeout() instanceof Time\Duration);
+            $this->timerOk = $this->timerOk
+                && $op->getHandle() instanceof Io\Poll\TimerHandle
+                && $op->getEvents() === [Io\Poll\Event::Timer]
+                && $op->getTimeout() instanceof Time\Duration;
             return $op->complete(Io\CompletionStatus::Done);
         }
         if ($op instanceof Io\Operation\Any) {
+            $this->anyRuns++;
             $members = $op->getOperations();
-            $timer = null;
-            foreach ($members as $m) {
-                if ($m instanceof Io\Operation\Timer) {
-                    $timer = $m;
-                } else {
-                    var_dump($m instanceof Io\Operation\Poll, $m->getHandle() instanceof Io\Poll\Handle, $m->getTimeout());
-                }
-            }
-            /* Report every member ready: libcurl copes with spurious readiness */
             $completions = [];
             foreach ($members as $m) {
-                $completions[] = $m === $timer ? $m->complete(Io\CompletionStatus::Done) : $m->completeReady($m->getEvents());
+                if ($m instanceof Io\Operation\Timer) {
+                    $completions[] = $m->complete(Io\CompletionStatus::Done);
+                } else {
+                    /* Poll members carry a weak handle and no deadline of their own */
+                    $this->membersOk = $this->membersOk
+                        && $m instanceof Io\Operation\Poll
+                        && $m->getHandle() instanceof Io\Poll\WeakHandle
+                        && $m->getTimeout() === null
+                        && $m->getEvents() !== [];
+                    /* Report every member ready: libcurl copes with spurious readiness */
+                    $completions[] = $m->completeReady($m->getEvents());
+                }
             }
             $c = $op->completeWith($completions);
-            var_dump(count($c->getCompletions()) === count($members));
+            $this->membersOk = $this->membersOk && count($c->getCompletions()) === count($members);
             return $c;
         }
         return $op->completeReady($op->getEvents());
@@ -56,7 +65,7 @@ var_dump(curl_exec($ch));
 var_dump(curl_errno($ch) !== 0);
 
 Io\Hooks\set_hooks(null);
-var_dump(array_unique($recorder->seen));
+var_dump(array_keys($recorder->seen), $recorder->anyRuns >= 1, $recorder->membersOk, $recorder->timerOk);
 
 /* Operations end when run() returns */
 $last = null;
@@ -79,17 +88,18 @@ try {
 }
 Io\Hooks\set_hooks(null);
 ?>
---EXPECTF--
-NULL
-array(0) {
-}
-bool(true)
-%A
+--EXPECT--
 bool(false)
 bool(true)
-array(%d) {
-%A
+array(2) {
+  [0]=>
+  string(18) "Io\Operation\Timer"
+  [1]=>
+  string(16) "Io\Operation\Any"
 }
+bool(true)
+bool(true)
+bool(true)
 bool(true)
 bool(false)
 The operation has ended
