@@ -534,7 +534,10 @@ PHP_METHOD(Io_Poll_TimerHandle, isPeriodic)
 
 typedef struct {
 	int read_fd;
-	int write_fd;   /* same as read_fd on eventfd */
+	int write_fd;   /* same as read_fd on eventfd; -1 when external */
+	bool owned;
+	void (*clear)(void *arg);   /* external: how to clear it */
+	void *clear_arg;
 } php_io_poll_notify_handle_data;
 
 static php_socket_t php_io_poll_notify_handle_get_fd(php_poll_handle_object *handle)
@@ -553,11 +556,13 @@ static void php_io_poll_notify_handle_cleanup(php_poll_handle_object *handle)
 {
 	php_io_poll_notify_handle_data *data = handle->handle_data;
 	if (data) {
-		if (data->write_fd >= 0 && data->write_fd != data->read_fd) {
-			close(data->write_fd);
-		}
-		if (data->read_fd >= 0) {
-			close(data->read_fd);
+		if (data->owned) {
+			if (data->write_fd >= 0 && data->write_fd != data->read_fd) {
+				close(data->write_fd);
+			}
+			if (data->read_fd >= 0) {
+				close(data->read_fd);
+			}
 		}
 		efree(data);
 		handle->handle_data = NULL;
@@ -630,8 +635,9 @@ PHP_METHOD(Io_Poll_NotifyHandle, __construct)
 		RETURN_THROWS();
 	}
 
-	php_io_poll_notify_handle_data *data = emalloc(sizeof(*data));
+	php_io_poll_notify_handle_data *data = ecalloc(1, sizeof(*data));
 	data->read_fd = data->write_fd = -1;
+	data->owned = true;
 	if (php_io_poll_notify_handle_open(data) != SUCCESS) {
 		efree(data);
 		zend_throw_exception_ex(php_io_poll_failed_context_init_class_entry, PHP_POLL_ERR_SYSTEM,
@@ -641,13 +647,32 @@ PHP_METHOD(Io_Poll_NotifyHandle, __construct)
 	intern->handle_data = data;
 }
 
+PHPAPI void php_io_poll_notify_handle_create_external(zval *dest, php_socket_t fd,
+		void (*clear)(void *arg), void *arg)
+{
+	object_init_ex(dest, php_io_poll_notify_handle_class_entry);
+	php_poll_handle_object *intern = PHP_POLL_HANDLE_OBJ_FROM_ZV(dest);
+	php_io_poll_notify_handle_data *data = ecalloc(1, sizeof(*data));
+	data->read_fd = (int) fd;
+	data->write_fd = -1;
+	data->owned = false;
+	data->clear = clear;
+	data->clear_arg = arg;
+	intern->handle_data = data;
+}
+
 PHP_METHOD(Io_Poll_NotifyHandle, notify)
 {
 	ZEND_PARSE_PARAMETERS_NONE();
 
 	php_poll_handle_object *intern = PHP_POLL_HANDLE_OBJ_FROM_ZV(getThis());
-	if (!intern->handle_data) {
+	php_io_poll_notify_handle_data *data = intern->handle_data;
+	if (!data) {
 		zend_throw_error(NULL, "Io\\Poll\\NotifyHandle object is not constructed");
+		RETURN_THROWS();
+	}
+	if (!data->owned) {
+		zend_throw_error(NULL, "This Io\\Poll\\NotifyHandle is raised by its owner and cannot be notified");
 		RETURN_THROWS();
 	}
 	php_poll_notify(&intern->std);
@@ -661,6 +686,10 @@ PHP_METHOD(Io_Poll_NotifyHandle, clear)
 	if (!data) {
 		zend_throw_error(NULL, "Io\\Poll\\NotifyHandle object is not constructed");
 		RETURN_THROWS();
+	}
+	if (!data->owned) {
+		data->clear(data->clear_arg);
+		return;
 	}
 #ifdef __linux__
 	uint64_t count;

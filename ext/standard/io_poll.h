@@ -39,6 +39,11 @@ PHPAPI void php_io_poll_timer_handle_create(zval *dest, zend_hrtime_t timeout_ns
 
 /* Raise an Io\Poll\NotifyHandle. Thread safe and async-signal safe. */
 PHPAPI void php_poll_notify(zend_object *handle);
+
+/* An Io\Poll\NotifyHandle over a descriptor someone else owns and clears,
+ * such as a ring's notification descriptor. notify() is unavailable on it. */
+PHPAPI void php_io_poll_notify_handle_create_external(zval *dest, php_socket_t fd,
+		void (*clear)(void *arg), void *arg);
 PHPAPI void php_stream_poll_weak_handle_from_stream(zval *dest, php_stream *stream);
 PHPAPI void php_stream_poll_weak_handle_notify(zend_object *handle_obj);
 PHPAPI void php_io_poll_handle_remove_from_all_contexts(zend_object *handle_obj);

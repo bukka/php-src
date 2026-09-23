@@ -495,10 +495,31 @@ PHPAPI int php_poll_wait(php_poll_ctx *ctx, php_poll_event *events, int max_even
 		}
 	}
 
-	/* Delegate to backend - it handles everything including ET simulation if needed */
+	/* Delegate to backend - it handles everything including ET simulation if needed.
+	 * A wait interrupted by a signal restarts with the remaining time (an
+	 * io_uring in the same process interrupts waits for its task work). */
 	int nfds = 0;
 	if (n_due < max_events) {
-		nfds = ctx->backend_ops->wait(ctx, events, max_events - n_due, timeout);
+		zend_hrtime_t limit = ZEND_HRTIME_T_MAX;
+		struct timespec rest_ts;
+		if (timeout) {
+			zend_hrtime_t now = zend_hrtime();
+			zend_hrtime_t rel = (zend_hrtime_t) timeout->tv_sec * ZEND_NANO_IN_SEC + (zend_hrtime_t) timeout->tv_nsec;
+			limit = rel < ZEND_HRTIME_T_MAX - now ? now + rel : ZEND_HRTIME_T_MAX;
+		}
+		for (;;) {
+			nfds = ctx->backend_ops->wait(ctx, events, max_events - n_due, timeout);
+			if (nfds >= 0 || ctx->last_error != PHP_POLL_ERR_INTERRUPTED) {
+				break;
+			}
+			if (limit != ZEND_HRTIME_T_MAX) {
+				zend_hrtime_t now = zend_hrtime();
+				zend_hrtime_t remaining = limit > now ? limit - now : 0;
+				rest_ts.tv_sec = remaining / ZEND_NANO_IN_SEC;
+				rest_ts.tv_nsec = remaining % ZEND_NANO_IN_SEC;
+				timeout = &rest_ts;
+			}
+		}
 		if (nfds < 0) {
 			return nfds;
 		}
