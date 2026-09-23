@@ -1554,6 +1554,11 @@ PHP_METHOD(Io_Poll_Context, onWatcherRemoved)
 	}
 }
 
+PHPAPI void php_poll_handle_invalidate(zend_object *handle_obj)
+{
+	php_io_poll_handle_remove_from_all_contexts(handle_obj);
+}
+
 /* Invalidation: the handle's resource is going away, so every watcher on it
  * is retired from its context while the fd is still open. */
 PHPAPI void php_io_poll_handle_remove_from_all_contexts(zend_object *handle_obj)

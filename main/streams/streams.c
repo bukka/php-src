@@ -29,6 +29,7 @@
 #include "ext/standard/php_string.h" /* for php_memnstr, used by php_stream_get_record() */
 #include "ext/uri/php_uri.h"
 #include "ext/standard/io_poll.h"
+#include "main/hooks/io_hooks.h"
 #include <stddef.h>
 #include <fcntl.h>
 #include "php_streams_int.h"
@@ -380,7 +381,11 @@ fprintf(stderr, "stream_free: %s:%p[%s] preserve_handle=%d release_cast=%d remov
 		if (stream->weak_poll_handle) {
 			zend_object *handle_obj = stream->weak_poll_handle;
 			stream->weak_poll_handle = NULL;
+			/* Retiring the watchers may drop the last reference to the handle */
+			GC_ADDREF(handle_obj);
 			php_stream_poll_weak_handle_notify(handle_obj);
+			php_io_handle_release_ops(handle_obj);
+			OBJ_RELEASE(handle_obj);
 		}
 
 		ret = stream->ops->close(stream, preserve_handle ? 0 : 1);
@@ -405,7 +410,11 @@ fprintf(stderr, "stream_free: %s:%p[%s] preserve_handle=%d release_cast=%d remov
 		if (stream->weak_poll_handle) {
 			zend_object *handle_obj = stream->weak_poll_handle;
 			stream->weak_poll_handle = NULL;
+			/* Retiring the watchers may drop the last reference to the handle */
+			GC_ADDREF(handle_obj);
 			php_stream_poll_weak_handle_notify(handle_obj);
+			php_io_handle_release_ops(handle_obj);
+			OBJ_RELEASE(handle_obj);
 		}
 
 		while (stream->readfilters.head) {

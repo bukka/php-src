@@ -10,12 +10,17 @@
    +----------------------------------------------------------------------+
 */
 
-/* The poll queue: a Poll context and its timers. Poll ops become one-shot
- * watchers and complete as Done with the triggered events, any other op
- * with a pollable descriptor becomes a one-shot watcher for its
- * ready_events and completes as Ready. Timer ops and op deadlines are
- * timers of the context. Ops without a descriptor complete as
- * Unsupported. */
+/* The poll queue: a Poll context and its timers. Poll ops complete as
+ * Done with the triggered events, any other op with a pollable descriptor
+ * completes as Ready for its ready_events. Timer ops and op deadlines are
+ * timers of the context. Ops without a descriptor complete as Unsupported.
+ *
+ * The context keeps exactly one registration per descriptor and the queue
+ * multiplexes interest over it: its armed events are the union of the
+ * submitted ops' events, re-armed at submit and withdrawn at completion or
+ * cancel, so a retained registration nobody is waiting on contributes
+ * nothing. A persistent op's add() and remove() bracket the registration;
+ * between runs it stays disarmed. */
 
 #include "php.h"
 #include "main/hooks/io_hooks.h"
@@ -26,6 +31,16 @@
 #define PHP_IO_POLL_MIN_EVENTS 64
 
 typedef struct _php_io_poll_req php_io_poll_req;
+typedef struct _php_io_poll_fdreg php_io_poll_fdreg;
+
+/* One descriptor in the context */
+struct _php_io_poll_fdreg {
+	int fd;
+	uint32_t armed;             /* events registered in the context */
+	bool in_ctx;
+	uint32_t n_retained;        /* persistent registrations, add() minus remove() */
+	php_io_poll_req *reqs;      /* submitted ops on the descriptor */
+};
 
 struct _php_io_poll_req {
 	php_io_op *op;
@@ -34,7 +49,9 @@ struct _php_io_poll_req {
 	php_io_poll_req *group;     /* member: the Any's request */
 	uint32_t index;             /* member: position in the Any */
 	php_poll_timer *timer;      /* the op's deadline, or the Timer op itself */
-	bool watching;              /* fd registered in the context */
+	php_io_poll_fdreg *fdreg;   /* the descriptor the op waits on */
+	uint32_t events;            /* the interest on fdreg */
+	php_io_poll_req *fd_next;   /* fdreg->reqs */
 	bool done;                  /* member: result recorded */
 	bool ready;                 /* top-level: in the ready list */
 	bool fired;                 /* group: in the fired list */
@@ -47,6 +64,8 @@ struct _php_io_poll_req {
 typedef struct {
 	php_io_queue base;
 	php_poll_ctx *ctx;
+	HashTable fdregs;           /* fd -> php_io_poll_fdreg */
+	uint32_t n_armed;           /* registrations with events armed */
 	php_io_poll_req *outstanding;
 	uint32_t pending;
 	php_io_poll_req **ready;
@@ -57,7 +76,6 @@ typedef struct {
 	uint32_t fired_cap;
 	php_poll_event *events;
 	uint32_t events_cap;
-	uint32_t n_watching;
 } php_io_poll_queue;
 
 static int php_io_poll_error_to_errno(php_poll_error err)
@@ -99,6 +117,76 @@ static void php_io_poll_list_remove(php_io_poll_req **list, uint32_t *n, php_io_
 	ZEND_UNREACHABLE();
 }
 
+/* Descriptor registrations */
+
+static php_io_poll_fdreg *php_io_poll_fdreg_get(php_io_poll_queue *q, int fd, bool create)
+{
+	php_io_poll_fdreg *reg = zend_hash_index_find_ptr(&q->fdregs, (zend_ulong) fd);
+	if (!reg && create) {
+		reg = ecalloc(1, sizeof(*reg));
+		reg->fd = fd;
+		zend_hash_index_add_new_ptr(&q->fdregs, (zend_ulong) fd, reg);
+	}
+	return reg;
+}
+
+static void php_io_poll_fdreg_drop(php_io_poll_queue *q, php_io_poll_fdreg *reg)
+{
+	if (reg->in_ctx) {
+		php_poll_remove(q->ctx, reg->fd);
+		if (reg->armed) {
+			q->n_armed--;
+		}
+	}
+	zend_hash_index_del(&q->fdregs, (zend_ulong) reg->fd);
+	efree(reg);
+}
+
+/* Bring the context's interest in line with the submitted ops. On failure
+ * the error is left in the context and the registration is unchanged. */
+static zend_result php_io_poll_fdreg_sync(php_io_poll_queue *q, php_io_poll_fdreg *reg)
+{
+	uint32_t wanted = 0;
+	for (php_io_poll_req *r = reg->reqs; r; r = r->fd_next) {
+		wanted |= r->events;
+	}
+
+	if (!reg->reqs && !reg->n_retained) {
+		php_io_poll_fdreg_drop(q, reg);
+		return SUCCESS;
+	}
+	if (!reg->in_ctx) {
+		if (!wanted) {
+			return SUCCESS;
+		}
+		if (php_poll_add(q->ctx, reg->fd, wanted, reg) != SUCCESS) {
+			return FAILURE;
+		}
+		reg->in_ctx = true;
+	} else if (wanted != reg->armed) {
+		if (php_poll_modify(q->ctx, reg->fd, wanted, reg) != SUCCESS) {
+			return FAILURE;
+		}
+	}
+	if (!reg->armed && wanted) {
+		q->n_armed++;
+	} else if (reg->armed && !wanted) {
+		q->n_armed--;
+	}
+	reg->armed = wanted;
+	return SUCCESS;
+}
+
+static void php_io_poll_fdreg_unlink(php_io_poll_req *req)
+{
+	php_io_poll_req **link = &req->fdreg->reqs;
+	while (*link != req) {
+		link = &(*link)->fd_next;
+	}
+	*link = req->fd_next;
+	req->fd_next = NULL;
+}
+
 /* Requests */
 
 static php_io_poll_req *php_io_poll_req_create(php_io_poll_queue *q, php_io_op *op, void *data)
@@ -114,11 +202,12 @@ static php_io_poll_req *php_io_poll_req_create(php_io_poll_queue *q, php_io_op *
 
 static void php_io_poll_req_unregister(php_io_poll_queue *q, php_io_poll_req *req)
 {
-	if (req->watching) {
-		/* A fired one-shot registration may already be gone on some backends */
-		php_poll_remove(q->ctx, (int) req->op->fd);
-		req->watching = false;
-		q->n_watching--;
+	if (req->fdreg) {
+		php_io_poll_fdreg *reg = req->fdreg;
+		php_io_poll_fdreg_unlink(req);
+		req->fdreg = NULL;
+		/* Withdrawing interest cannot fail in a way that matters here */
+		php_io_poll_fdreg_sync(q, reg);
 	}
 	if (req->timer) {
 		php_poll_timer_remove(q->ctx, req->timer);
@@ -188,14 +277,23 @@ static void php_io_poll_req_arm(php_io_poll_queue *q, php_io_poll_req *req)
 	}
 
 	uint32_t events = op->type == PHP_IO_OP_POLL ? op->u.poll.events : op->ready_events;
-	events &= PHP_POLL_READ | PHP_POLL_WRITE | PHP_POLL_ERROR | PHP_POLL_HUP | PHP_POLL_RDHUP;
+	events &= PHP_POLL_READ | PHP_POLL_WRITE | PHP_POLL_ERROR | PHP_POLL_HUP | PHP_POLL_RDHUP | PHP_POLL_PRI;
 	if (op->fd == SOCK_ERR || events == 0) {
 		php_io_poll_req_complete(q, req, PHP_IO_UNSUPPORTED, 0, 0);
 		return;
 	}
 
-	if (php_poll_add(q->ctx, (int) op->fd, events | PHP_POLL_ONESHOT, req) != SUCCESS) {
+	php_io_poll_fdreg *reg = php_io_poll_fdreg_get(q, (int) op->fd, true);
+	req->fdreg = reg;
+	req->events = events;
+	req->fd_next = reg->reqs;
+	reg->reqs = req;
+
+	if (php_io_poll_fdreg_sync(q, reg) != SUCCESS) {
 		php_poll_error err = php_poll_get_error(q->ctx);
+		php_io_poll_fdreg_unlink(req);
+		req->fdreg = NULL;
+		php_io_poll_fdreg_sync(q, reg);
 		if (err == PHP_POLL_ERR_NOSUPPORT) {
 			php_io_poll_req_complete(q, req, PHP_IO_UNSUPPORTED, 0, 0);
 		} else {
@@ -203,11 +301,25 @@ static void php_io_poll_req_arm(php_io_poll_queue *q, php_io_poll_req *req)
 		}
 		return;
 	}
-	req->watching = true;
-	q->n_watching++;
 
 	if (!php_deadline_is_infinite(&op->deadline)) {
 		req->timer = php_poll_timer_add(q->ctx, op->deadline.hrtime, 0, req);
+	}
+}
+
+/* A descriptor reported ready: every op whose interest it meets completes;
+ * an error or hangup completes all of them. */
+static void php_io_poll_fdreg_fire(php_io_poll_queue *q, php_io_poll_fdreg *reg, uint32_t revents)
+{
+	bool failure = (revents & (PHP_POLL_ERROR | PHP_POLL_HUP)) != 0;
+	php_io_poll_req *r = reg->reqs;
+	while (r) {
+		php_io_poll_req *next = r->fd_next;
+		if (failure || (r->events & revents)) {
+			php_io_status status = r->op->type == PHP_IO_OP_POLL ? PHP_IO_DONE : PHP_IO_READY;
+			php_io_poll_req_complete(q, r, status, revents, 0);
+		}
+		r = next;
 	}
 }
 
@@ -287,7 +399,7 @@ static zend_result php_io_poll_queue_submit(php_io_queue *base, php_io_op *op, v
 		req->n_members = n;
 		req->members = n ? safe_emalloc(n, sizeof(*req->members), 0) : NULL;
 		for (uint32_t i = 0; i < n; i++) {
-			php_io_poll_req *m = php_io_poll_req_create(q, &op->u.any.ops[i], NULL);
+			php_io_poll_req *m = php_io_poll_req_create(q, op->u.any.ops[i], NULL);
 			m->group = req;
 			m->index = i;
 			req->members[i] = m;
@@ -337,14 +449,32 @@ static zend_result php_io_poll_queue_cancel(php_io_queue *base, php_io_op *op)
 	return SUCCESS;
 }
 
+/* A persistent op: retain the descriptor's registration across runs */
 static zend_result php_io_poll_queue_add(php_io_queue *base, php_io_op *op)
 {
-	/* Persistent registrations are not retained yet: every run is one-shot */
+	php_io_poll_queue *q = (php_io_poll_queue *) base;
+
+	if (op->fd == SOCK_ERR) {
+		errno = EBADF;
+		return FAILURE;
+	}
+	php_io_poll_fdreg *reg = php_io_poll_fdreg_get(q, (int) op->fd, true);
+	reg->n_retained++;
 	return SUCCESS;
 }
 
 static void php_io_poll_queue_remove(php_io_queue *base, php_io_op *op)
 {
+	php_io_poll_queue *q = (php_io_poll_queue *) base;
+
+	if (op->fd == SOCK_ERR) {
+		return;
+	}
+	php_io_poll_fdreg *reg = php_io_poll_fdreg_get(q, (int) op->fd, false);
+	if (reg && reg->n_retained) {
+		reg->n_retained--;
+		php_io_poll_fdreg_sync(q, reg);
+	}
 }
 
 static uint32_t php_io_poll_queue_deliver(php_io_poll_queue *q, php_io_queue_completion *out, uint32_t max)
@@ -390,7 +520,7 @@ static int php_io_poll_queue_wait(php_io_queue *base, php_io_queue_completion *o
 			return (int) php_io_poll_queue_deliver(q, out, max);
 		}
 
-		if (limit == ZEND_HRTIME_T_MAX && q->n_watching == 0 && php_poll_timer_count(q->ctx) == 0) {
+		if (limit == ZEND_HRTIME_T_MAX && q->n_armed == 0 && php_poll_timer_count(q->ctx) == 0) {
 			/* Nothing can ever complete: an infinite timer, or nothing at all */
 			errno = EDEADLK;
 			return -1;
@@ -418,19 +548,16 @@ static int php_io_poll_queue_wait(php_io_queue *base, php_io_queue_completion *o
 		}
 
 		for (int i = 0; i < n; i++) {
-			php_io_poll_req *req = q->events[i].data;
-			php_io_status status;
-			if (req->ready || req->done) {
-				/* Its deadline and its readiness landed in the same reap */
-				continue;
-			}
 			if (q->events[i].revents & PHP_POLL_TIMER) {
-				/* A fired one-shot timer is disarmed: only remove it */
-				status = req->op->type == PHP_IO_OP_TIMER ? PHP_IO_DONE : PHP_IO_TIMEOUT;
+				php_io_poll_req *req = q->events[i].data;
+				if (req->ready || req->done) {
+					/* Its deadline and its readiness landed in the same reap */
+					continue;
+				}
+				php_io_status status = req->op->type == PHP_IO_OP_TIMER ? PHP_IO_DONE : PHP_IO_TIMEOUT;
 				php_io_poll_req_complete(q, req, status, 0, 0);
 			} else {
-				status = req->op->type == PHP_IO_OP_POLL ? PHP_IO_DONE : PHP_IO_READY;
-				php_io_poll_req_complete(q, req, status, q->events[i].revents, 0);
+				php_io_poll_fdreg_fire(q, q->events[i].data, q->events[i].revents);
 			}
 		}
 
@@ -468,6 +595,16 @@ static void php_io_poll_queue_destroy(php_io_queue *base)
 		php_io_poll_queue_cancel(base, q->outstanding->op);
 	}
 	ZEND_ASSERT(q->pending == 0 && q->n_ready == 0 && q->n_fired == 0);
+
+	/* Retained registrations of persistent ops nobody removed */
+	php_io_poll_fdreg *reg;
+	ZEND_HASH_FOREACH_PTR(&q->fdregs, reg) {
+		if (reg->in_ctx) {
+			php_poll_remove(q->ctx, reg->fd);
+		}
+		efree(reg);
+	} ZEND_HASH_FOREACH_END();
+	zend_hash_destroy(&q->fdregs);
 
 	php_poll_destroy(q->ctx);
 	if (q->ready) {
@@ -508,6 +645,7 @@ PHPAPI php_io_queue *php_io_queue_create_poll(php_poll_backend_type backend)
 	php_io_poll_queue *q = ecalloc(1, sizeof(*q));
 	q->base.ops = &php_io_poll_queue_ops;
 	q->ctx = ctx;
+	zend_hash_init(&q->fdregs, 8, NULL, NULL, 0);
 	q->events_cap = PHP_IO_POLL_MIN_EVENTS;
 	q->events = safe_emalloc(q->events_cap, sizeof(*q->events), 0);
 	return &q->base;

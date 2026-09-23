@@ -40,7 +40,7 @@ typedef enum {
 	PHP_IO_OP_ANY,
 } php_io_op_type;
 
-#define PHP_IO_OP_F_PERSISTENT 0x01
+#define PHP_IO_OP_F_PERSISTENT 0x01   /* POLL only: a registration that outlives one run */
 
 typedef enum {
 	PHP_IO_DONE,
@@ -76,8 +76,8 @@ struct _php_io_op {
 		struct { const char *node; const char *service;
 		         const struct addrinfo *hints; struct addrinfo **res; } getaddrinfo;
 		struct { bool data_only; } fsync;
-		struct { php_io_op *ops; uint32_t n;
-		         php_io_op_result *results; uint32_t n_results; } any;
+		struct { php_io_op **ops; uint32_t n;                          /* members, caller owned */
+		         php_io_op_result *results; uint32_t n_results; } any;  /* filled on completion */
 	} u;
 	zend_object *zobj;          /* Io\Operation wrapper, created lazily for userland hooks */
 	void *provider_data;        /* provider scratch, never read by the core */
@@ -96,7 +96,15 @@ PHPAPI void php_io_op_accept(php_io_op *op, zend_object *handle, php_socket_t fd
 PHPAPI void php_io_op_connect(php_io_op *op, zend_object *handle, php_socket_t fd, const struct sockaddr *addr, socklen_t addrlen, php_deadline dl);
 PHPAPI void php_io_op_getaddrinfo(php_io_op *op, const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res, php_deadline dl);
 PHPAPI void php_io_op_fsync(php_io_op *op, zend_object *handle, php_socket_t fd, bool data_only);
-PHPAPI void php_io_op_any(php_io_op *op, php_io_op *members, uint32_t n, php_io_op_result *results);
+PHPAPI void php_io_op_any(php_io_op *op, php_io_op **members, uint32_t n, php_io_op_result *results);
+
+/* Persistent Poll ops: owned by the core, kept on the handle, the same
+ * php_io_op for every run that asks for the same (handle, events) pair. The
+ * provider's add hook runs at creation and its remove hook at release. */
+typedef struct _php_io_persistent_op php_io_persistent_op;
+PHPAPI php_io_op *php_io_op_persistent(zend_object *handle, uint32_t events);
+PHPAPI void php_io_op_persistent_release(zend_object *handle, uint32_t events);
+PHPAPI void php_io_handle_release_ops(zend_object *handle);
 
 /* Hooks */
 

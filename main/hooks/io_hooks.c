@@ -107,13 +107,117 @@ PHPAPI void php_io_op_fsync(php_io_op *op, zend_object *handle, php_socket_t fd,
 	op->u.fsync.data_only = data_only;
 }
 
-PHPAPI void php_io_op_any(php_io_op *op, php_io_op *members, uint32_t n, php_io_op_result *results)
+PHPAPI void php_io_op_any(php_io_op *op, php_io_op **members, uint32_t n, php_io_op_result *results)
 {
 	php_io_op_init(op, PHP_IO_OP_ANY, NULL, SOCK_ERR, 0, php_io_deadline_infinite());
 	op->u.any.ops = members;
 	op->u.any.n = n;
 	op->u.any.results = results;
 	op->u.any.n_results = 0;
+}
+
+/* Persistent operations */
+
+struct _php_io_persistent_op {
+	php_io_op op;
+	bool registered;                    /* the provider's add hook ran */
+	php_io_persistent_op *next_on_handle;
+	php_io_persistent_op *prev;         /* FG(io_persistent_ops) */
+	php_io_persistent_op *next;
+};
+
+static void php_io_op_detach_zobj(php_io_op *op);
+
+static void php_io_persistent_register(php_io_persistent_op *p)
+{
+	php_io_hooks_state *state = FG(io_hooks);
+	if (!p->registered && state) {
+		p->registered = true;
+		if (state->hooks.add) {
+			state->hooks.add(state->data, &p->op);
+		}
+	}
+}
+
+PHPAPI php_io_op *php_io_op_persistent(zend_object *handle_obj, uint32_t events)
+{
+	php_poll_handle_object *handle = PHP_POLL_HANDLE_OBJ_FROM_ZOBJ(handle_obj);
+	php_io_persistent_op *p;
+
+	for (p = handle->persistent; p; p = p->next_on_handle) {
+		if (p->op.u.poll.events == events) {
+			php_io_persistent_register(p);
+			return &p->op;
+		}
+	}
+
+	p = ecalloc(1, sizeof(*p));
+	php_io_op_poll(&p->op, handle_obj, php_poll_handle_get_fd(handle), events, php_io_deadline_infinite());
+	p->op.flags |= PHP_IO_OP_F_PERSISTENT;
+	GC_ADDREF(handle_obj);
+
+	p->next_on_handle = handle->persistent;
+	handle->persistent = p;
+	p->next = FG(io_persistent_ops);
+	if (p->next) {
+		p->next->prev = p;
+	}
+	FG(io_persistent_ops) = p;
+
+	php_io_persistent_register(p);
+	return &p->op;
+}
+
+static void php_io_persistent_free(php_io_persistent_op *p)
+{
+	php_poll_handle_object *handle = PHP_POLL_HANDLE_OBJ_FROM_ZOBJ(p->op.handle);
+	php_io_hooks_state *state = FG(io_hooks);
+
+	if (p->registered && state && state->hooks.remove) {
+		state->hooks.remove(state->data, &p->op);
+	}
+	p->registered = false;
+	if (p->op.queue) {
+		p->op.queue->ops->orphan(p->op.queue, &p->op);
+	}
+	php_io_op_detach_zobj(&p->op);
+
+	php_io_persistent_op **link = &handle->persistent;
+	while (*link != p) {
+		link = &(*link)->next_on_handle;
+	}
+	*link = p->next_on_handle;
+
+	if (p->prev) {
+		p->prev->next = p->next;
+	} else {
+		FG(io_persistent_ops) = p->next;
+	}
+	if (p->next) {
+		p->next->prev = p->prev;
+	}
+
+	OBJ_RELEASE(&handle->std);
+	efree(p);
+}
+
+PHPAPI void php_io_op_persistent_release(zend_object *handle_obj, uint32_t events)
+{
+	php_poll_handle_object *handle = PHP_POLL_HANDLE_OBJ_FROM_ZOBJ(handle_obj);
+	for (php_io_persistent_op *p = handle->persistent; p; p = p->next_on_handle) {
+		if (p->op.u.poll.events == events) {
+			php_io_persistent_free(p);
+			return;
+		}
+	}
+}
+
+PHPAPI void php_io_handle_release_ops(zend_object *handle_obj)
+{
+	php_poll_handle_object *handle = PHP_POLL_HANDLE_OBJ_FROM_ZOBJ(handle_obj);
+	while (handle->persistent) {
+		php_io_persistent_free(handle->persistent);
+	}
 }
 
 /* Registration */
@@ -129,6 +233,11 @@ PHPAPI zend_result php_io_hooks_register(const php_io_hooks *hooks, size_t size,
 				state->hooks.dtor(state->data);
 			}
 			efree(state);
+			/* The outgoing provider dropped its registrations; the next one
+			 * sees every persistent op as new */
+			for (php_io_persistent_op *p = FG(io_persistent_ops); p; p = p->next) {
+				p->registered = false;
+			}
 		}
 		return SUCCESS;
 	}
@@ -196,12 +305,31 @@ static void php_io_op_finish(php_io_op *op)
 	}
 	if (op->type == PHP_IO_OP_ANY) {
 		for (uint32_t i = 0; i < op->u.any.n; i++) {
-			php_io_op *m = &op->u.any.ops[i];
+			php_io_op *m = op->u.any.ops[i];
 			ZEND_ASSERT(!m->queue);
-			php_io_op_detach_zobj(m);
+			if (!(m->flags & PHP_IO_OP_F_PERSISTENT)) {
+				php_io_op_detach_zobj(m);
+			}
 		}
 	}
-	php_io_op_detach_zobj(op);
+	if (!(op->flags & PHP_IO_OP_F_PERSISTENT)) {
+		php_io_op_detach_zobj(op);
+	}
+}
+
+/* A provider installed after a persistent op was created has not seen it */
+static void php_io_op_register_persistent(php_io_op *op)
+{
+	if (op->flags & PHP_IO_OP_F_PERSISTENT) {
+		php_io_persistent_register((php_io_persistent_op *) op);
+	}
+	if (op->type == PHP_IO_OP_ANY) {
+		for (uint32_t i = 0; i < op->u.any.n; i++) {
+			if (op->u.any.ops[i]->flags & PHP_IO_OP_F_PERSISTENT) {
+				php_io_persistent_register((php_io_persistent_op *) op->u.any.ops[i]);
+			}
+		}
+	}
 }
 
 static php_io_queue *php_io_core_queue(void)
@@ -302,6 +430,14 @@ PHPAPI zend_result php_io_run(php_io_op *op, php_io_op_result *result)
 	php_io_hooks_state *state = FG(io_hooks);
 
 	if (state) {
+		zend_object *pending = EG(exception);
+		php_io_op_register_persistent(op);
+		if (EG(exception) != pending) {
+			result->status = PHP_IO_CANCELLED;
+			result->res = -1;
+			result->error = ECANCELED;
+			return FAILURE;
+		}
 		zend_result rc = state->hooks.run(state->data, op, result);
 		php_io_op_finish(op);
 

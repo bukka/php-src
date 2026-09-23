@@ -359,7 +359,7 @@ PHP_METHOD(Io_Operation_Any, getOperations)
 	array_init_size(return_value, op->u.any.n);
 	for (uint32_t i = 0; i < op->u.any.n; i++) {
 		zval member;
-		ZVAL_OBJ_COPY(&member, php_io_operation_get_zobj(&op->u.any.ops[i]));
+		ZVAL_OBJ_COPY(&member, php_io_operation_get_zobj(op->u.any.ops[i]));
 		zend_hash_next_index_insert_new(Z_ARRVAL_P(return_value), &member);
 	}
 }
@@ -368,7 +368,7 @@ PHP_METHOD(Io_Operation_Any, getOperations)
 static int32_t php_io_any_member_index(php_io_op *any, zend_object *operation)
 {
 	for (uint32_t i = 0; i < any->u.any.n; i++) {
-		if (any->u.any.ops[i].zobj == operation) {
+		if (any->u.any.ops[i]->zobj == operation) {
 			return (int32_t) i;
 		}
 	}
@@ -694,7 +694,7 @@ static void php_io_opqueue_completion_to_zval(zval *rv, php_io_queue_completion 
 		array_init_size(&members, op->u.any.n_results);
 		for (uint32_t i = 0; i < op->u.any.n_results; i++) {
 			php_io_op_result *r = &op->u.any.results[i];
-			php_io_op *member = &op->u.any.ops[r->index];
+			php_io_op *member = op->u.any.ops[r->index];
 			zval member_zv;
 			php_io_completion_create(&member_zv, member, php_io_operation_get_zobj(member),
 					r->status, r->res, r->error, NULL, NULL);

@@ -427,6 +427,7 @@ PHP_RINIT_FUNCTION(basic) /* {{{ */
 
 	FG(io_hooks) = NULL;
 	FG(io_queue) = NULL;
+	FG(io_persistent_ops) = NULL;
 
 	return SUCCESS;
 }

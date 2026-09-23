@@ -104,6 +104,7 @@ typedef struct {
 	int pclose_wait;
 	struct _php_io_hooks_state *io_hooks; /* main/hooks/io_hooks.h, NULL when no provider is installed */
 	struct _php_io_queue *io_queue;       /* the core's queue for the no-hooks path, created lazily */
+	struct _php_io_persistent_op *io_persistent_ops; /* every persistent op of the request */
 #ifdef HAVE_GETHOSTBYNAME_R
 	struct hostent tmp_host_info;
 	char *tmp_host_buf;

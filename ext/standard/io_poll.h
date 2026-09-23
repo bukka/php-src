@@ -42,6 +42,10 @@ PHPAPI void php_poll_notify(zend_object *handle);
 PHPAPI void php_stream_poll_weak_handle_from_stream(zval *dest, php_stream *stream);
 PHPAPI void php_stream_poll_weak_handle_notify(zend_object *handle_obj);
 PHPAPI void php_io_poll_handle_remove_from_all_contexts(zend_object *handle_obj);
+/* The handle's resource is going away: every watcher on it is retired
+ * while the descriptor is still open. Persistent ops are released
+ * separately by php_io_handle_release_ops(). */
+PHPAPI void php_poll_handle_invalidate(zend_object *handle_obj);
 
 END_EXTERN_C()
 
