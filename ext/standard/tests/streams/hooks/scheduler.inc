@@ -57,24 +57,20 @@ class Scheduler implements Hooks
         }
 
         // Compute wait() timeout from the nearest deadline
-        $timeoutSec = null;
-        $timeoutUsec = 0;
+        $timeoutNs = null;
         $now = hrtime(true);
         foreach ($this->fiberDeadlines as [$deadline]) {
-            $remaining = $deadline - $now;
-            if ($remaining <= 0) {
-                $timeoutSec = 0;
-                $timeoutUsec = 0;
-                break;
+            $remaining = max(0, $deadline - $now);
+            if ($timeoutNs === null || $remaining < $timeoutNs) {
+                $timeoutNs = $remaining;
             }
-            $remainingUsec = intdiv($remaining, 1_000);
-            if ($timeoutSec === null || $remainingUsec < $timeoutSec * 1_000_000 + $timeoutUsec) {
-                $timeoutSec = intdiv($remainingUsec, 1_000_000);
-                $timeoutUsec = $remainingUsec % 1_000_000;
+            if ($timeoutNs === 0) {
+                break;
             }
         }
 
-        $watchers = $this->pollContext->wait($timeoutSec, $timeoutUsec);
+        $timeout = $timeoutNs === null ? null : \Time\Duration::fromNanoseconds($timeoutNs);
+        $watchers = $this->pollContext->wait($timeout);
 
         // Group triggered events by fiber; a fiber gets at most one result handle
         // (the first one that fires). Events from a second handle for the same fiber
