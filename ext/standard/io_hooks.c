@@ -34,14 +34,14 @@ static zend_class_entry *php_io_operation_timer_ce;
 static zend_class_entry *php_io_operation_any_ce;
 static zend_class_entry *php_io_completion_ce;
 static zend_class_entry *php_io_invalid_operation_exception_ce;
-static zend_class_entry *php_io_operation_queue_ce;
+PHPAPI zend_class_entry *php_io_operation_queue_ce;
 static zend_class_entry *php_io_poll_operation_queue_ce;
 static zend_class_entry *php_io_hooks_ce;
 static zend_class_entry *php_io_hooks_capability_ce;
 
 static zend_object_handlers php_io_operation_handlers;
 static zend_object_handlers php_io_completion_handlers;
-static zend_object_handlers php_io_poll_operation_queue_handlers;
+PHPAPI zend_object_handlers php_io_opqueue_handlers;
 
 typedef struct {
 	php_io_op *op;              /* NULL once the operation ended */
@@ -60,14 +60,6 @@ typedef struct {
 	zend_object std;
 } php_io_completion_obj;
 
-typedef struct _php_io_opqueue_sub php_io_opqueue_sub;
-
-typedef struct {
-	php_io_queue *queue;
-	php_io_opqueue_sub *subs;   /* submissions not delivered yet */
-	zend_object std;
-} php_io_opqueue_obj;
-
 /* One submission: what comes back as the completion's operation and data */
 struct _php_io_opqueue_sub {
 	zend_object *operation;
@@ -78,7 +70,6 @@ struct _php_io_opqueue_sub {
 
 #define PHP_IO_OPERATION_FROM_ZOBJ(o) ZEND_CONTAINER_OF(o, php_io_operation_obj, std)
 #define PHP_IO_COMPLETION_FROM_ZOBJ(o) ZEND_CONTAINER_OF(o, php_io_completion_obj, std)
-#define PHP_IO_OPQUEUE_FROM_ZOBJ(o) ZEND_CONTAINER_OF(o, php_io_opqueue_obj, std)
 
 /* Completion status enum */
 
@@ -465,7 +456,7 @@ PHP_METHOD(Io_Completion, getCompletions)
 
 /* Io\Poll\OperationQueue */
 
-static zend_object *php_io_poll_operation_queue_create_object(zend_class_entry *ce)
+PHPAPI zend_object *php_io_opqueue_create_object(zend_class_entry *ce)
 {
 	php_io_opqueue_obj *intern = zend_object_alloc(sizeof(php_io_opqueue_obj), ce);
 	zend_object_std_init(&intern->std, ce);
@@ -527,7 +518,7 @@ static php_io_opqueue_obj *php_io_opqueue_fetch(zval *zv)
 {
 	php_io_opqueue_obj *intern = PHP_IO_OPQUEUE_FROM_ZOBJ(Z_OBJ_P(zv));
 	if (!intern->queue) {
-		zend_throw_error(NULL, "Io\\Poll\\OperationQueue object is not constructed");
+		zend_throw_error(NULL, "%s object is not constructed", ZSTR_VAL(Z_OBJCE_P(zv)->name));
 	}
 	return intern;
 }
@@ -1078,13 +1069,13 @@ PHP_MINIT_FUNCTION(io_hooks)
 	php_io_operation_queue_ce = register_class_Io_OperationQueue();
 
 	php_io_poll_operation_queue_ce = register_class_Io_Poll_OperationQueue(php_io_operation_queue_ce);
-	php_io_poll_operation_queue_ce->create_object = php_io_poll_operation_queue_create_object;
-	memcpy(&php_io_poll_operation_queue_handlers, &std_object_handlers, sizeof(zend_object_handlers));
-	php_io_poll_operation_queue_handlers.offset = offsetof(php_io_opqueue_obj, std);
-	php_io_poll_operation_queue_handlers.free_obj = php_io_poll_operation_queue_free_object;
-	php_io_poll_operation_queue_handlers.get_gc = php_io_poll_operation_queue_get_gc;
-	php_io_poll_operation_queue_handlers.clone_obj = NULL;
-	php_io_poll_operation_queue_ce->default_object_handlers = &php_io_poll_operation_queue_handlers;
+	php_io_poll_operation_queue_ce->create_object = php_io_opqueue_create_object;
+	memcpy(&php_io_opqueue_handlers, &std_object_handlers, sizeof(zend_object_handlers));
+	php_io_opqueue_handlers.offset = offsetof(php_io_opqueue_obj, std);
+	php_io_opqueue_handlers.free_obj = php_io_poll_operation_queue_free_object;
+	php_io_opqueue_handlers.get_gc = php_io_poll_operation_queue_get_gc;
+	php_io_opqueue_handlers.clone_obj = NULL;
+	php_io_poll_operation_queue_ce->default_object_handlers = &php_io_opqueue_handlers;
 
 	php_io_hooks_ce = register_class_Io_Hooks_Hooks();
 	php_io_hooks_capability_ce = register_class_Io_Hooks_Capability();

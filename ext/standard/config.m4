@@ -420,6 +420,7 @@ PHP_NEW_EXTENSION([standard], m4_normalize([
     info.c
     io_hooks.c
     io_poll.c
+    io_ring.c
     iptc.c
     levenshtein.c
     libavifinfo/avifinfo.c

@@ -21,6 +21,22 @@ BEGIN_EXTERN_C()
  * added: the op holds the one that keeps it alive. */
 PHPAPI zend_object *php_io_operation_get_zobj(php_io_op *op);
 
+/* A userland queue object over a C queue: Io\Poll\OperationQueue and
+ * Io\Ring\Engine share the implementation of Io\OperationQueue */
+typedef struct _php_io_opqueue_sub php_io_opqueue_sub;
+
+typedef struct {
+	php_io_queue *queue;
+	php_io_opqueue_sub *subs;   /* submissions not delivered yet */
+	zend_object std;
+} php_io_opqueue_obj;
+
+#define PHP_IO_OPQUEUE_FROM_ZOBJ(o) ZEND_CONTAINER_OF(o, php_io_opqueue_obj, std)
+
+PHPAPI extern zend_class_entry *php_io_operation_queue_ce;
+PHPAPI extern zend_object_handlers php_io_opqueue_handlers;
+PHPAPI zend_object *php_io_opqueue_create_object(zend_class_entry *ce);
+
 PHP_MINIT_FUNCTION(io_hooks);
 
 END_EXTERN_C()

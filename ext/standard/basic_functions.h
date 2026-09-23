@@ -44,6 +44,7 @@ ZEND_API void php_get_highlight_struct(zend_syntax_highlighter_ini *syntax_highl
 
 PHP_MINIT_FUNCTION(poll);
 PHP_MINIT_FUNCTION(io_hooks);
+PHP_MINIT_FUNCTION(io_ring);
 PHP_MINIT_FUNCTION(user_filters);
 PHP_RSHUTDOWN_FUNCTION(user_filters);
 PHP_RSHUTDOWN_FUNCTION(browscap);
