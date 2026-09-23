@@ -45,6 +45,7 @@ static zend_object_handlers php_io_poll_operation_queue_handlers;
 
 typedef struct {
 	php_io_op *op;              /* NULL once the operation ended */
+	zend_object *timer_handle;  /* Timer operation: the TimerHandle of getHandle(), created on first call */
 	zend_object std;
 } php_io_operation_obj;
 
@@ -104,7 +105,17 @@ static zend_object *php_io_operation_create_object(zend_class_entry *ce)
 	zend_object_std_init(&intern->std, ce);
 	object_properties_init(&intern->std, ce);
 	intern->op = NULL;
+	intern->timer_handle = NULL;
 	return &intern->std;
+}
+
+static void php_io_operation_free_object(zend_object *obj)
+{
+	php_io_operation_obj *intern = PHP_IO_OPERATION_FROM_ZOBJ(obj);
+	if (intern->timer_handle) {
+		OBJ_RELEASE(intern->timer_handle);
+	}
+	zend_object_std_dtor(&intern->std);
 }
 
 static zend_class_entry *php_io_operation_ce_for(php_io_op_type type)
@@ -221,6 +232,19 @@ PHP_METHOD(Io_Operation, getHandle)
 	php_io_op *op = php_io_operation_fetch(ZEND_THIS);
 	if (!op) {
 		RETURN_THROWS();
+	}
+	if (op->type == PHP_IO_OP_TIMER) {
+		/* A TimerHandle for the remaining time, so a provider on a Context
+		 * can watch it like any other handle */
+		php_io_operation_obj *intern = PHP_IO_OPERATION_FROM_ZOBJ(Z_OBJ_P(ZEND_THIS));
+		if (!intern->timer_handle) {
+			zval handle_zv;
+			zend_hrtime_t remaining = php_deadline_is_infinite(&op->deadline)
+					? ZEND_HRTIME_T_MAX / 2 : php_io_deadline_remaining(&op->deadline, zend_hrtime());
+			php_io_poll_timer_handle_create(&handle_zv, remaining, false);
+			intern->timer_handle = Z_OBJ(handle_zv);
+		}
+		RETURN_OBJ_COPY(intern->timer_handle);
 	}
 	if (!op->handle) {
 		RETURN_NULL();
@@ -1023,6 +1047,7 @@ PHP_MINIT_FUNCTION(io_hooks)
 	php_io_operation_ce->create_object = php_io_operation_create_object;
 	memcpy(&php_io_operation_handlers, &std_object_handlers, sizeof(zend_object_handlers));
 	php_io_operation_handlers.offset = offsetof(php_io_operation_obj, std);
+	php_io_operation_handlers.free_obj = php_io_operation_free_object;
 	php_io_operation_handlers.clone_obj = NULL;
 	php_io_operation_ce->default_object_handlers = &php_io_operation_handlers;
 

@@ -414,7 +414,7 @@ PHP_MINIT_FUNCTION(curl)
 
 	curlfile_register_class();
 
-	php_curl_socket_weak_handle_ce = register_class_Io_Curl_SocketWeakHandle(php_io_poll_handle_class_entry);
+	php_curl_socket_weak_handle_ce = register_class_Io_Curl_SocketWeakHandle(php_io_poll_weak_handle_class_entry);
 	php_curl_socket_weak_handle_ce->create_object = php_curl_socket_handle_create_object;
 	memcpy(&php_curl_socket_handle_object_handlers, &std_object_handlers,
 		sizeof(zend_object_handlers));

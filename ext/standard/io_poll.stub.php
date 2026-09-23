@@ -27,6 +27,9 @@ namespace Io\Poll {
         public function isAvailable(): bool {}
 
         public function supportsEdgeTriggering(): bool {}
+
+        /** Whether Event::Priority is reported; kqueue and WSAPoll cannot. */
+        public function supportsPriority(): bool {}
     }
 
     // Keep in sync with main/php_poll.h!
@@ -38,10 +41,54 @@ namespace Io\Poll {
         case ReadHangUp;
         case OneShot;
         case EdgeTriggered;
+        /** Priority data (POLLPRI), backend dependent */
+        case Priority;
+        /** A TimerHandle fired */
+        case Timer;
+        /** A NotifyHandle is raised and not yet cleared */
+        case Notify;
     }
 
     interface Handle
     {
+    }
+
+    /**
+     * A handle that holds its resource weakly: the resource can go away while
+     * the handle is referenced, and the handle then reports invalid.
+     */
+    interface WeakHandle extends Handle
+    {
+    }
+
+    /**
+     * A deadline in the context, one-shot or periodic. Watched with
+     * Event::Timer; a fired one-shot timer is re-armed by modifyEvents().
+     * @strict-properties
+     * @not-serializable
+     */
+    final class TimerHandle implements Handle
+    {
+        public function __construct(\Time\Duration $timeout, bool $periodic = false) {}
+
+        public function getTimeout(): \Time\Duration {}
+
+        public function isPeriodic(): bool {}
+    }
+
+    /**
+     * A readiness source the program raises itself. notify() makes it ready
+     * and it stays ready until clear() consumed every pending notification.
+     * @strict-properties
+     * @not-serializable
+     */
+    final class NotifyHandle implements Handle
+    {
+        public function __construct() {}
+
+        public function notify(): void {}
+
+        public function clear(): void {}
     }
 
     /**
@@ -156,7 +203,7 @@ namespace {
      * @strict-properties
      * @not-serializable
      */
-    final class StreamPollWeakHandle implements Io\Poll\Handle
+    final class StreamPollWeakHandle implements Io\Poll\WeakHandle
     {
         private function __construct() {}
 

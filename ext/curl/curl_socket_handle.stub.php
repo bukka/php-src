@@ -4,11 +4,11 @@
 
 namespace Io\Curl {
 
-    use Io\Poll\Handle;
+    use Io\Poll\WeakHandle;
 
     /**
      * @strict-properties
      * @not-serializable
      */
-    final class SocketWeakHandle implements Handle {}
+    final class SocketWeakHandle implements WeakHandle {}
 }

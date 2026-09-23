@@ -41,7 +41,7 @@ PHPAPI void php_io_op_poll(php_io_op *op, zend_object *handle, php_socket_t fd, 
 
 PHPAPI void php_io_op_timer(php_io_op *op, php_deadline dl)
 {
-	php_io_op_init(op, PHP_IO_OP_TIMER, NULL, SOCK_ERR, 0, dl);
+	php_io_op_init(op, PHP_IO_OP_TIMER, NULL, SOCK_ERR, PHP_POLL_TIMER, dl);
 }
 
 PHPAPI void php_io_op_read(php_io_op *op, zend_object *handle, php_socket_t fd, void *buf, size_t len, int64_t off, php_deadline dl)

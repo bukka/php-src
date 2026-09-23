@@ -21,6 +21,12 @@
 #include "io_poll_arginfo.h"
 #include "io_poll_decl.h"
 #include "ext/date/php_time.h"
+#include "zend_interfaces.h"
+
+#include <fcntl.h>
+#ifdef __linux__
+# include <sys/eventfd.h>
+#endif
 
 /* Class entries */
 static zend_class_entry *php_io_poll_backend_class_entry;
@@ -28,6 +34,9 @@ zend_class_entry *php_io_poll_event_class_entry;
 static zend_class_entry *php_io_poll_context_class_entry;
 static zend_class_entry *php_io_poll_watcher_class_entry;
 PHPAPI zend_class_entry *php_io_poll_handle_class_entry;
+PHPAPI zend_class_entry *php_io_poll_weak_handle_class_entry;
+static zend_class_entry *php_io_poll_timer_handle_class_entry;
+static zend_class_entry *php_io_poll_notify_handle_class_entry;
 PHPAPI zend_class_entry *php_io_exception_class_entry;
 static zend_class_entry *php_io_poll_exception_class_entry;
 static zend_class_entry *php_io_poll_failed_backend_unavailable_class_entry;
@@ -61,6 +70,7 @@ typedef struct php_io_poll_watcher_object {
 	php_io_poll_context_object *context; /* Back reference to Context object */
 	php_socket_t fd; /* Registered fd, SOCK_ERR when inactive */
 	php_stream *stream; /* Watched stream, NULL when not registered in its watcher list */
+	php_poll_timer *timer; /* TimerHandle watcher: the context's timer */
 	zend_object std;
 } php_io_poll_watcher_object;
 
@@ -68,6 +78,7 @@ typedef struct php_io_poll_watcher_object {
 struct php_io_poll_context_object {
 	php_poll_ctx *ctx;
 	HashTable *watchers; /* Maps fd -> watcher object */
+	HashTable *timer_watchers; /* Maps watcher pointer key -> watcher object */
 	zend_fcall_info_cache on_watcher_removed_fcc;
 	zend_object std;
 };
@@ -158,6 +169,18 @@ PHPAPI zend_result php_io_poll_events_to_event_enums(uint32_t events, zval *even
 	}
 	if (events & PHP_POLL_ET) {
 		ZVAL_OBJ_COPY(&enum_case, zend_enum_get_case_by_id(php_io_poll_event_class_entry, ZEND_ENUM_Io_Poll_Event_EdgeTriggered));
+		add_next_index_zval(event_enums, &enum_case);
+	}
+	if (events & PHP_POLL_PRI) {
+		ZVAL_OBJ_COPY(&enum_case, zend_enum_get_case_by_id(php_io_poll_event_class_entry, ZEND_ENUM_Io_Poll_Event_Priority));
+		add_next_index_zval(event_enums, &enum_case);
+	}
+	if (events & PHP_POLL_TIMER) {
+		ZVAL_OBJ_COPY(&enum_case, zend_enum_get_case_by_id(php_io_poll_event_class_entry, ZEND_ENUM_Io_Poll_Event_Timer));
+		add_next_index_zval(event_enums, &enum_case);
+	}
+	if (events & PHP_POLL_NOTIFY) {
+		ZVAL_OBJ_COPY(&enum_case, zend_enum_get_case_by_id(php_io_poll_event_class_entry, ZEND_ENUM_Io_Poll_Event_Notify));
 		add_next_index_zval(event_enums, &enum_case);
 	}
 
@@ -380,6 +403,276 @@ PHP_METHOD(StreamPollWeakHandle, getStream)
 	php_stream_to_zval(data->stream, return_value);
 }
 
+/* TimerHandle: a deadline in the context, no descriptor anywhere */
+
+typedef struct {
+	zend_hrtime_t timeout;
+	bool periodic;
+} php_io_poll_timer_handle_data;
+
+static php_socket_t php_io_poll_timer_handle_get_fd(php_poll_handle_object *handle)
+{
+	return SOCK_ERR;
+}
+
+static int php_io_poll_timer_handle_is_valid(php_poll_handle_object *handle)
+{
+	return handle->handle_data != NULL;
+}
+
+static void php_io_poll_timer_handle_cleanup(php_poll_handle_object *handle)
+{
+	if (handle->handle_data) {
+		efree(handle->handle_data);
+		handle->handle_data = NULL;
+	}
+}
+
+static php_poll_handle_ops php_io_poll_timer_handle_ops = {
+	.get_fd   = php_io_poll_timer_handle_get_fd,
+	.is_valid = php_io_poll_timer_handle_is_valid,
+	.cleanup  = php_io_poll_timer_handle_cleanup,
+};
+
+static zend_object *php_io_poll_timer_handle_create_object(zend_class_entry *ce)
+{
+	php_poll_handle_object *intern = php_poll_handle_object_create(
+			sizeof(php_poll_handle_object), ce, &php_io_poll_timer_handle_ops);
+	intern->std.handlers = &php_io_poll_handle_object_handlers;
+	return &intern->std;
+}
+
+static void php_io_poll_timer_handle_init(php_poll_handle_object *handle, zend_hrtime_t timeout, bool periodic)
+{
+	php_io_poll_timer_handle_data *data = emalloc(sizeof(*data));
+	data->timeout = timeout;
+	data->periodic = periodic;
+	handle->handle_data = data;
+}
+
+PHPAPI void php_io_poll_timer_handle_create(zval *dest, zend_hrtime_t timeout_ns, bool periodic)
+{
+	object_init_ex(dest, php_io_poll_timer_handle_class_entry);
+	php_io_poll_timer_handle_init(PHP_POLL_HANDLE_OBJ_FROM_ZV(dest), timeout_ns, periodic);
+}
+
+static bool php_io_poll_duration_to_ns(php_date_time_duration *d, uint32_t arg_num, zend_hrtime_t *ns)
+{
+	if (d->duration.negative) {
+		zend_argument_value_error(arg_num, "must not be negative");
+		return false;
+	}
+	if (d->duration.seconds >= ZEND_HRTIME_T_MAX / ZEND_NANO_IN_SEC) {
+		zend_argument_value_error(arg_num, "is too large");
+		return false;
+	}
+	*ns = (zend_hrtime_t) d->duration.seconds * ZEND_NANO_IN_SEC + d->duration.nanoseconds;
+	return true;
+}
+
+static void php_io_poll_ns_to_duration(zval *rv, zend_hrtime_t ns)
+{
+	zval arg;
+	ZVAL_LONG(&arg, (zend_long) MIN(ns, (zend_hrtime_t) ZEND_LONG_MAX));
+	zend_call_method_with_1_params(NULL, php_date_ce_time_duration, NULL, "fromnanoseconds", rv, &arg);
+}
+
+PHP_METHOD(Io_Poll_TimerHandle, __construct)
+{
+	php_date_time_duration *timeout;
+	bool periodic = false;
+
+	ZEND_PARSE_PARAMETERS_START(1, 2)
+		Z_PARAM_DATE_TIME_DURATION(timeout)
+		Z_PARAM_OPTIONAL
+		Z_PARAM_BOOL(periodic)
+	ZEND_PARSE_PARAMETERS_END();
+
+	php_poll_handle_object *intern = PHP_POLL_HANDLE_OBJ_FROM_ZV(getThis());
+	if (intern->handle_data) {
+		zend_throw_error(NULL, "Io\\Poll\\TimerHandle object is already constructed");
+		RETURN_THROWS();
+	}
+
+	zend_hrtime_t ns;
+	if (!php_io_poll_duration_to_ns(timeout, 1, &ns)) {
+		RETURN_THROWS();
+	}
+	if (periodic && ns == 0) {
+		zend_argument_value_error(1, "must not be zero for a periodic timer");
+		RETURN_THROWS();
+	}
+	php_io_poll_timer_handle_init(intern, ns, periodic);
+}
+
+PHP_METHOD(Io_Poll_TimerHandle, getTimeout)
+{
+	ZEND_PARSE_PARAMETERS_NONE();
+
+	php_io_poll_timer_handle_data *data = PHP_POLL_HANDLE_OBJ_FROM_ZV(getThis())->handle_data;
+	if (!data) {
+		zend_throw_error(NULL, "Io\\Poll\\TimerHandle object is not constructed");
+		RETURN_THROWS();
+	}
+	php_io_poll_ns_to_duration(return_value, data->timeout);
+}
+
+PHP_METHOD(Io_Poll_TimerHandle, isPeriodic)
+{
+	ZEND_PARSE_PARAMETERS_NONE();
+
+	php_io_poll_timer_handle_data *data = PHP_POLL_HANDLE_OBJ_FROM_ZV(getThis())->handle_data;
+	if (!data) {
+		zend_throw_error(NULL, "Io\\Poll\\TimerHandle object is not constructed");
+		RETURN_THROWS();
+	}
+	RETURN_BOOL(data->periodic);
+}
+
+/* NotifyHandle: an eventfd, or a pipe where there is none. Level: readable
+ * from notify() until clear(). */
+
+typedef struct {
+	int read_fd;
+	int write_fd;   /* same as read_fd on eventfd */
+} php_io_poll_notify_handle_data;
+
+static php_socket_t php_io_poll_notify_handle_get_fd(php_poll_handle_object *handle)
+{
+	php_io_poll_notify_handle_data *data = handle->handle_data;
+	return data ? (php_socket_t) data->read_fd : SOCK_ERR;
+}
+
+static int php_io_poll_notify_handle_is_valid(php_poll_handle_object *handle)
+{
+	php_io_poll_notify_handle_data *data = handle->handle_data;
+	return data && data->read_fd >= 0;
+}
+
+static void php_io_poll_notify_handle_cleanup(php_poll_handle_object *handle)
+{
+	php_io_poll_notify_handle_data *data = handle->handle_data;
+	if (data) {
+		if (data->write_fd >= 0 && data->write_fd != data->read_fd) {
+			close(data->write_fd);
+		}
+		if (data->read_fd >= 0) {
+			close(data->read_fd);
+		}
+		efree(data);
+		handle->handle_data = NULL;
+	}
+}
+
+static php_poll_handle_ops php_io_poll_notify_handle_ops = {
+	.get_fd   = php_io_poll_notify_handle_get_fd,
+	.is_valid = php_io_poll_notify_handle_is_valid,
+	.cleanup  = php_io_poll_notify_handle_cleanup,
+};
+
+static zend_object *php_io_poll_notify_handle_create_object(zend_class_entry *ce)
+{
+	php_poll_handle_object *intern = php_poll_handle_object_create(
+			sizeof(php_poll_handle_object), ce, &php_io_poll_notify_handle_ops);
+	intern->std.handlers = &php_io_poll_handle_object_handlers;
+	return &intern->std;
+}
+
+static zend_result php_io_poll_notify_handle_open(php_io_poll_notify_handle_data *data)
+{
+#ifdef __linux__
+	int fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+	if (fd < 0) {
+		return FAILURE;
+	}
+	data->read_fd = data->write_fd = fd;
+	return SUCCESS;
+#else
+	int fds[2];
+	if (pipe(fds) != 0) {
+		return FAILURE;
+	}
+	for (int i = 0; i < 2; i++) {
+		fcntl(fds[i], F_SETFL, fcntl(fds[i], F_GETFL) | O_NONBLOCK);
+		fcntl(fds[i], F_SETFD, FD_CLOEXEC);
+	}
+	data->read_fd = fds[0];
+	data->write_fd = fds[1];
+	return SUCCESS;
+#endif
+}
+
+PHPAPI void php_poll_notify(zend_object *handle_obj)
+{
+	php_poll_handle_object *handle = PHP_POLL_HANDLE_OBJ_FROM_ZOBJ(handle_obj);
+	php_io_poll_notify_handle_data *data = handle->handle_data;
+	if (!data || data->write_fd < 0) {
+		return;
+	}
+#ifdef __linux__
+	uint64_t one = 1;
+	ssize_t n = write(data->write_fd, &one, sizeof(one));
+#else
+	char one = 1;
+	ssize_t n = write(data->write_fd, &one, sizeof(one));
+#endif
+	/* A full counter or pipe is still readable, so nothing is lost */
+	(void) n;
+}
+
+PHP_METHOD(Io_Poll_NotifyHandle, __construct)
+{
+	ZEND_PARSE_PARAMETERS_NONE();
+
+	php_poll_handle_object *intern = PHP_POLL_HANDLE_OBJ_FROM_ZV(getThis());
+	if (intern->handle_data) {
+		zend_throw_error(NULL, "Io\\Poll\\NotifyHandle object is already constructed");
+		RETURN_THROWS();
+	}
+
+	php_io_poll_notify_handle_data *data = emalloc(sizeof(*data));
+	data->read_fd = data->write_fd = -1;
+	if (php_io_poll_notify_handle_open(data) != SUCCESS) {
+		efree(data);
+		zend_throw_exception_ex(php_io_poll_failed_context_init_class_entry, PHP_POLL_ERR_SYSTEM,
+				"Failed to create the notification descriptor: %s", strerror(errno));
+		RETURN_THROWS();
+	}
+	intern->handle_data = data;
+}
+
+PHP_METHOD(Io_Poll_NotifyHandle, notify)
+{
+	ZEND_PARSE_PARAMETERS_NONE();
+
+	php_poll_handle_object *intern = PHP_POLL_HANDLE_OBJ_FROM_ZV(getThis());
+	if (!intern->handle_data) {
+		zend_throw_error(NULL, "Io\\Poll\\NotifyHandle object is not constructed");
+		RETURN_THROWS();
+	}
+	php_poll_notify(&intern->std);
+}
+
+PHP_METHOD(Io_Poll_NotifyHandle, clear)
+{
+	ZEND_PARSE_PARAMETERS_NONE();
+
+	php_io_poll_notify_handle_data *data = PHP_POLL_HANDLE_OBJ_FROM_ZV(getThis())->handle_data;
+	if (!data) {
+		zend_throw_error(NULL, "Io\\Poll\\NotifyHandle object is not constructed");
+		RETURN_THROWS();
+	}
+#ifdef __linux__
+	uint64_t count;
+	ssize_t n = read(data->read_fd, &count, sizeof(count));
+	(void) n;
+#else
+	char buf[64];
+	while (read(data->read_fd, buf, sizeof(buf)) > 0) {
+	}
+#endif
+}
+
 /* Handle interface internal only */
 static int php_stream_poll_handle_implement_interface(zend_class_entry *interface, zend_class_entry *implementor)
 {
@@ -415,6 +708,7 @@ static zend_object *php_io_poll_watcher_create_object(zend_class_entry *ce)
 	intern->context = NULL;
 	intern->fd = SOCK_ERR;
 	intern->stream = NULL;
+	intern->timer = NULL;
 	ZVAL_NULL(&intern->data);
 
 	return &intern->std;
@@ -429,6 +723,7 @@ static zend_object *php_io_poll_context_create_object(zend_class_entry *ce)
 
 	intern->ctx = NULL;
 	intern->watchers = NULL;
+	intern->timer_watchers = NULL;
 	intern->on_watcher_removed_fcc = empty_fcall_info_cache;
 
 	return &intern->std;
@@ -494,15 +789,25 @@ static void php_io_poll_context_retire_watcher(
 		php_io_poll_context_object *context, php_io_poll_watcher_object *watcher, bool notify)
 {
 	php_socket_t fd = watcher->fd;
+	bool is_timer = watcher->timer != NULL;
 
-	php_poll_remove(context->ctx, (int) fd);
+	if (is_timer) {
+		php_poll_timer_remove(context->ctx, watcher->timer);
+		watcher->timer = NULL;
+	} else {
+		php_poll_remove(context->ctx, (int) fd);
+	}
 	php_io_poll_stream_unwatch(watcher);
 	php_io_poll_handle_unwatch(context, watcher);
 	php_io_poll_watcher_deactivate(watcher);
 
 	/* Keep the watcher alive across the registry removal and the callback */
 	GC_ADDREF(&watcher->std);
-	zend_hash_index_del(context->watchers, (zend_ulong) fd);
+	if (is_timer) {
+		zend_hash_index_del(context->timer_watchers, php_io_poll_compute_ptr_key(watcher));
+	} else {
+		zend_hash_index_del(context->watchers, (zend_ulong) fd);
+	}
 
 	if (notify && ZEND_FCC_INITIALIZED(context->on_watcher_removed_fcc)) {
 		zval watcher_zv;
@@ -561,6 +866,16 @@ static void php_io_poll_context_free_object(zend_object *obj)
 		} ZEND_HASH_FOREACH_END();
 	}
 
+	if (intern->timer_watchers) {
+		ZEND_HASH_FOREACH_VAL(intern->timer_watchers, zval *zv) {
+			php_io_poll_watcher_object *watcher = PHP_POLL_WATCHER_OBJ_FROM_ZOBJ(Z_OBJ_P(zv));
+			php_poll_timer_remove(intern->ctx, watcher->timer);
+			watcher->timer = NULL;
+			php_io_poll_handle_unwatch(intern, watcher);
+			php_io_poll_watcher_deactivate(watcher);
+		} ZEND_HASH_FOREACH_END();
+	}
+
 	if (intern->ctx) {
 		php_poll_destroy(intern->ctx);
 	}
@@ -568,6 +883,10 @@ static void php_io_poll_context_free_object(zend_object *obj)
 	if (intern->watchers) {
 		zend_hash_destroy(intern->watchers);
 		efree(intern->watchers);
+	}
+	if (intern->timer_watchers) {
+		zend_hash_destroy(intern->timer_watchers);
+		efree(intern->timer_watchers);
 	}
 
 	if (ZEND_FCC_INITIALIZED(intern->on_watcher_removed_fcc)) {
@@ -601,6 +920,11 @@ static HashTable *php_io_poll_context_get_gc(zend_object *obj, zval **table, int
 			zend_get_gc_buffer_add_zval(gc_buffer, zv);
 		} ZEND_HASH_FOREACH_END();
 	}
+	if (intern->timer_watchers) {
+		ZEND_HASH_FOREACH_VAL(intern->timer_watchers, zval *zv) {
+			zend_get_gc_buffer_add_zval(gc_buffer, zv);
+		} ZEND_HASH_FOREACH_END();
+	}
 
 	if (ZEND_FCC_INITIALIZED(intern->on_watcher_removed_fcc)) {
 		if (intern->on_watcher_removed_fcc.object) {
@@ -626,12 +950,38 @@ static zend_result php_io_poll_watcher_modify_events(
 		return FAILURE;
 	}
 
-	/* Re-add if the backend dropped a fired one-shot registration */
 	php_poll_ctx *poll_ctx = watcher->context->ctx;
+
+	if (watcher->timer) {
+		php_io_poll_timer_handle_data *td = watcher->handle->handle_data;
+		if ((events & ~(PHP_POLL_TIMER | PHP_POLL_ONESHOT)) || !(events & PHP_POLL_TIMER)) {
+			zend_argument_value_error(1, "must be Event::Timer for a TimerHandle");
+			return FAILURE;
+		}
+		/* Re-arm from now, with the handle's timeout */
+		php_poll_timer_modify(poll_ctx, watcher->timer, zend_hrtime() + td->timeout,
+				td->periodic ? td->timeout : 0, watcher);
+		watcher->watched_events = events;
+		return SUCCESS;
+	}
+
+	uint32_t backend_events = events;
+	if (watcher->handle->ops == &php_io_poll_notify_handle_ops) {
+		if ((events & ~(PHP_POLL_NOTIFY | PHP_POLL_ONESHOT)) || !(events & PHP_POLL_NOTIFY)) {
+			zend_argument_value_error(1, "must be Event::Notify for a NotifyHandle");
+			return FAILURE;
+		}
+		backend_events = (events & ~PHP_POLL_NOTIFY) | PHP_POLL_READ;
+	} else if (events & (PHP_POLL_TIMER | PHP_POLL_NOTIFY)) {
+		zend_argument_value_error(1, "must not contain Event::Timer or Event::Notify for this handle");
+		return FAILURE;
+	}
+
+	/* Re-add if the backend dropped a fired one-shot registration */
 	int fd = (int) watcher->fd;
-	if (php_poll_modify(poll_ctx, fd, events, watcher) != SUCCESS
+	if (php_poll_modify(poll_ctx, fd, backend_events, watcher) != SUCCESS
 			&& (php_poll_get_error(poll_ctx) != PHP_POLL_ERR_NOTFOUND
-					|| php_poll_add(poll_ctx, fd, events, watcher) != SUCCESS)) {
+					|| php_poll_add(poll_ctx, fd, backend_events, watcher) != SUCCESS)) {
 		php_poll_error err = php_poll_get_error(poll_ctx);
 		php_io_poll_throw_failed_operation(php_io_poll_failed_watcher_mod_class_entry,
 				"Failed to modify watcher in polling system", err);
@@ -699,6 +1049,14 @@ PHP_METHOD(Io_Poll_Backend, supportsEdgeTriggering)
 	php_poll_backend_type type = php_io_poll_backend_enum_to_type(enum_obj);
 
 	RETURN_BOOL(php_poll_backend_supports_edge_triggering(type));
+}
+
+PHP_METHOD(Io_Poll_Backend, supportsPriority)
+{
+	ZEND_PARSE_PARAMETERS_NONE();
+
+	php_poll_backend_type type = php_io_poll_backend_enum_to_type(Z_OBJ_P(ZEND_THIS));
+	RETURN_BOOL(php_poll_backend_supports_priority(type));
 }
 
 PHP_METHOD(StreamPollHandle, __construct)
@@ -939,6 +1297,8 @@ PHP_METHOD(Io_Poll_Context, __construct)
 
 	intern->watchers = emalloc(sizeof(HashTable));
 	zend_hash_init(intern->watchers, 8, NULL, ZVAL_PTR_DTOR, 0);
+	intern->timer_watchers = emalloc(sizeof(HashTable));
+	zend_hash_init(intern->timer_watchers, 4, NULL, ZVAL_PTR_DTOR, 0);
 }
 
 PHP_METHOD(Io_Poll_Context, add)
@@ -960,6 +1320,52 @@ PHP_METHOD(Io_Poll_Context, add)
 	events = php_io_poll_event_enums_to_events(event_enums);
 	if (!events) {
 		zend_argument_type_error(2, "must be array of Event enums");
+		RETURN_THROWS();
+	}
+
+	if (handle->ops == &php_io_poll_timer_handle_ops) {
+		php_io_poll_timer_handle_data *td = handle->handle_data;
+		if ((events & ~(PHP_POLL_TIMER | PHP_POLL_ONESHOT)) || !(events & PHP_POLL_TIMER)) {
+			zend_argument_value_error(2, "must be Event::Timer for a TimerHandle");
+			RETURN_THROWS();
+		}
+		if (!td) {
+			zend_throw_exception(
+					php_io_poll_invalid_handle_class_entry, "Invalid handle for polling", 0);
+			RETURN_THROWS();
+		}
+
+		object_init_ex(return_value, php_io_poll_watcher_class_entry);
+		php_io_poll_watcher_object *watcher = PHP_POLL_WATCHER_OBJ_FROM_ZV(return_value);
+		watcher->handle = handle;
+		watcher->watched_events = events;
+		GC_ADDREF(&handle->std);
+		if (data) {
+			ZVAL_COPY(&watcher->data, data);
+		}
+
+		watcher->timer = php_poll_timer_add(intern->ctx, zend_hrtime() + td->timeout,
+				td->periodic ? td->timeout : 0, watcher);
+
+		zval watcher_zv;
+		ZVAL_OBJ(&watcher_zv, &watcher->std);
+		GC_ADDREF(&watcher->std);
+		zend_hash_index_add_new(intern->timer_watchers, php_io_poll_compute_ptr_key(watcher), &watcher_zv);
+
+		watcher->active = true;
+		watcher->context = intern;
+		return;
+	}
+
+	uint32_t backend_events = events;
+	if (handle->ops == &php_io_poll_notify_handle_ops) {
+		if ((events & ~(PHP_POLL_NOTIFY | PHP_POLL_ONESHOT)) || !(events & PHP_POLL_NOTIFY)) {
+			zend_argument_value_error(2, "must be Event::Notify for a NotifyHandle");
+			RETURN_THROWS();
+		}
+		backend_events = (events & ~PHP_POLL_NOTIFY) | PHP_POLL_READ;
+	} else if (events & (PHP_POLL_TIMER | PHP_POLL_NOTIFY)) {
+		zend_argument_value_error(2, "must not contain Event::Timer or Event::Notify for this handle");
 		RETURN_THROWS();
 	}
 
@@ -1002,7 +1408,7 @@ PHP_METHOD(Io_Poll_Context, add)
 	}
 
 	/* Add to poll context */
-	if (php_poll_add(intern->ctx, (int) fd, events, watcher) != SUCCESS) {
+	if (php_poll_add(intern->ctx, (int) fd, backend_events, watcher) != SUCCESS) {
 		php_poll_error err = php_poll_get_error(intern->ctx);
 		if (err == PHP_POLL_ERR_EXISTS) {
 			zend_throw_exception(
@@ -1072,6 +1478,8 @@ PHP_METHOD(Io_Poll_Context, wait)
 		if (max_events <= 0) {
 			max_events = 64;
 		}
+		/* Timers are reported in the same array */
+		max_events += php_poll_timer_count(intern->ctx);
 	} else if (UNEXPECTED(max_events <= 0)) {
 		zend_argument_value_error(2, "must be greater than 0");
 		RETURN_THROWS();
@@ -1096,7 +1504,11 @@ PHP_METHOD(Io_Poll_Context, wait)
 	for (int i = 0; i < num_events; i++) {
 		php_io_poll_watcher_object *watcher = (php_io_poll_watcher_object *) events[i].data;
 		if (watcher) {
-			watcher->triggered_events = events[i].revents;
+			uint32_t revents = events[i].revents;
+			if (watcher->handle->ops == &php_io_poll_notify_handle_ops) {
+				revents = (revents & (PHP_POLL_ERROR | PHP_POLL_HUP)) | ((revents & PHP_POLL_READ) ? PHP_POLL_NOTIFY : 0);
+			}
+			watcher->triggered_events = revents;
 
 			zval watcher_zv;
 			ZVAL_OBJ(&watcher_zv, &watcher->std);
@@ -1191,11 +1603,24 @@ PHP_MINIT_FUNCTION(poll)
 	php_io_poll_handle_object_handlers.clone_obj = NULL;
 	php_stream_poll_handle_class_entry->default_object_handlers = &php_io_poll_handle_object_handlers;
 
+	/* Register WeakHandle interface */
+	php_io_poll_weak_handle_class_entry = register_class_Io_Poll_WeakHandle(php_io_poll_handle_class_entry);
+	php_io_poll_weak_handle_class_entry->interface_gets_implemented = php_stream_poll_handle_implement_interface;
+
 	/* Register StreamPollWeakHandle class */
 	php_stream_poll_weak_handle_class_entry
-			= register_class_StreamPollWeakHandle(php_io_poll_handle_class_entry);
+			= register_class_StreamPollWeakHandle(php_io_poll_weak_handle_class_entry);
 	php_stream_poll_weak_handle_class_entry->create_object = php_stream_poll_weak_handle_create_object;
 	php_stream_poll_weak_handle_class_entry->default_object_handlers = &php_io_poll_handle_object_handlers;
+
+	/* Register the generic handles */
+	php_io_poll_timer_handle_class_entry = register_class_Io_Poll_TimerHandle(php_io_poll_handle_class_entry);
+	php_io_poll_timer_handle_class_entry->create_object = php_io_poll_timer_handle_create_object;
+	php_io_poll_timer_handle_class_entry->default_object_handlers = &php_io_poll_handle_object_handlers;
+
+	php_io_poll_notify_handle_class_entry = register_class_Io_Poll_NotifyHandle(php_io_poll_handle_class_entry);
+	php_io_poll_notify_handle_class_entry->create_object = php_io_poll_notify_handle_create_object;
+	php_io_poll_notify_handle_class_entry->default_object_handlers = &php_io_poll_handle_object_handlers;
 
 	/* Register Watcher class */
 	php_io_poll_watcher_class_entry = register_class_Io_Poll_Watcher();

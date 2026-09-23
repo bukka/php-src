@@ -25,6 +25,7 @@ PHPAPI void php_io_poll_stream_notify_close(php_stream *stream);
 PHPAPI extern zend_class_entry *php_io_exception_class_entry;
 PHPAPI extern zend_class_entry *php_io_poll_event_class_entry;
 PHPAPI extern zend_class_entry *php_io_poll_handle_class_entry;
+PHPAPI extern zend_class_entry *php_io_poll_weak_handle_class_entry;
 PHPAPI extern zend_class_entry *php_stream_poll_handle_class_entry;
 
 PHPAPI zend_result php_io_poll_events_to_event_enums(uint32_t events, zval *event_enums);
@@ -32,6 +33,12 @@ PHPAPI void php_io_poll_throw_failed_wait(const char *message, php_poll_error er
 PHPAPI uint32_t php_io_poll_event_enums_to_events(zval *event_enums);
 
 PHPAPI void php_stream_poll_handle_from_stream(zval *dest, php_stream *stream);
+
+/* Io\Poll\TimerHandle with the given timeout */
+PHPAPI void php_io_poll_timer_handle_create(zval *dest, zend_hrtime_t timeout_ns, bool periodic);
+
+/* Raise an Io\Poll\NotifyHandle. Thread safe and async-signal safe. */
+PHPAPI void php_poll_notify(zend_object *handle);
 PHPAPI void php_stream_poll_weak_handle_from_stream(zval *dest, php_stream *stream);
 PHPAPI void php_stream_poll_weak_handle_notify(zend_object *handle_obj);
 PHPAPI void php_io_poll_handle_remove_from_all_contexts(zend_object *handle_obj);

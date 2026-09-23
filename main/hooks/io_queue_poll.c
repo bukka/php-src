@@ -10,11 +10,12 @@
    +----------------------------------------------------------------------+
 */
 
-/* The poll queue: a Poll context plus a deadline heap. Poll ops become
- * one-shot watchers and complete as Done with the triggered events, any
- * other op with a pollable descriptor becomes a one-shot watcher for its
- * ready_events and completes as Ready. Timer ops are heap entries. Ops
- * without a descriptor complete as Unsupported. */
+/* The poll queue: a Poll context and its timers. Poll ops become one-shot
+ * watchers and complete as Done with the triggered events, any other op
+ * with a pollable descriptor becomes a one-shot watcher for its
+ * ready_events and completes as Ready. Timer ops and op deadlines are
+ * timers of the context. Ops without a descriptor complete as
+ * Unsupported. */
 
 #include "php.h"
 #include "main/hooks/io_hooks.h"
@@ -22,7 +23,6 @@
 
 #include <errno.h>
 
-#define PHP_IO_POLL_NOT_IN_HEAP UINT32_MAX
 #define PHP_IO_POLL_MIN_EVENTS 64
 
 typedef struct _php_io_poll_req php_io_poll_req;
@@ -33,7 +33,7 @@ struct _php_io_poll_req {
 	php_io_op_result result;
 	php_io_poll_req *group;     /* member: the Any's request */
 	uint32_t index;             /* member: position in the Any */
-	uint32_t heap_idx;
+	php_poll_timer *timer;      /* the op's deadline, or the Timer op itself */
 	bool watching;              /* fd registered in the context */
 	bool done;                  /* member: result recorded */
 	bool ready;                 /* top-level: in the ready list */
@@ -47,9 +47,6 @@ struct _php_io_poll_req {
 typedef struct {
 	php_io_queue base;
 	php_poll_ctx *ctx;
-	php_io_poll_req **heap;
-	uint32_t heap_size;
-	uint32_t heap_cap;
 	php_io_poll_req *outstanding;
 	uint32_t pending;
 	php_io_poll_req **ready;
@@ -77,79 +74,6 @@ static int php_io_poll_error_to_errno(php_poll_error err)
 		case PHP_POLL_ERR_NOSUPPORT: return ENOTSUP;
 		default: return EIO;
 	}
-}
-
-/* Deadline heap */
-
-static zend_always_inline zend_hrtime_t php_io_poll_req_deadline(php_io_poll_req *req)
-{
-	return req->op->deadline.hrtime;
-}
-
-static void php_io_poll_heap_set(php_io_poll_queue *q, uint32_t i, php_io_poll_req *req)
-{
-	q->heap[i] = req;
-	req->heap_idx = i;
-}
-
-static void php_io_poll_heap_up(php_io_poll_queue *q, uint32_t i)
-{
-	php_io_poll_req *req = q->heap[i];
-	while (i > 0) {
-		uint32_t parent = (i - 1) / 2;
-		if (php_io_poll_req_deadline(q->heap[parent]) <= php_io_poll_req_deadline(req)) {
-			break;
-		}
-		php_io_poll_heap_set(q, i, q->heap[parent]);
-		i = parent;
-	}
-	php_io_poll_heap_set(q, i, req);
-}
-
-static void php_io_poll_heap_down(php_io_poll_queue *q, uint32_t i)
-{
-	php_io_poll_req *req = q->heap[i];
-	for (;;) {
-		uint32_t left = 2 * i + 1, right = left + 1, smallest = i;
-		zend_hrtime_t best = php_io_poll_req_deadline(req);
-		if (left < q->heap_size && php_io_poll_req_deadline(q->heap[left]) < best) {
-			smallest = left;
-			best = php_io_poll_req_deadline(q->heap[left]);
-		}
-		if (right < q->heap_size && php_io_poll_req_deadline(q->heap[right]) < best) {
-			smallest = right;
-		}
-		if (smallest == i) {
-			break;
-		}
-		php_io_poll_heap_set(q, i, q->heap[smallest]);
-		i = smallest;
-	}
-	php_io_poll_heap_set(q, i, req);
-}
-
-static void php_io_poll_heap_push(php_io_poll_queue *q, php_io_poll_req *req)
-{
-	if (q->heap_size == q->heap_cap) {
-		q->heap_cap = q->heap_cap ? q->heap_cap * 2 : 16;
-		q->heap = safe_erealloc(q->heap, q->heap_cap, sizeof(*q->heap), 0);
-	}
-	php_io_poll_heap_set(q, q->heap_size++, req);
-	php_io_poll_heap_up(q, req->heap_idx);
-}
-
-static void php_io_poll_heap_remove(php_io_poll_queue *q, php_io_poll_req *req)
-{
-	uint32_t i = req->heap_idx;
-	ZEND_ASSERT(i != PHP_IO_POLL_NOT_IN_HEAP && q->heap[i] == req);
-	req->heap_idx = PHP_IO_POLL_NOT_IN_HEAP;
-	q->heap_size--;
-	if (i == q->heap_size) {
-		return;
-	}
-	php_io_poll_heap_set(q, i, q->heap[q->heap_size]);
-	php_io_poll_heap_down(q, i);
-	php_io_poll_heap_up(q, q->heap[i]->heap_idx);
 }
 
 /* Lists */
@@ -182,7 +106,6 @@ static php_io_poll_req *php_io_poll_req_create(php_io_poll_queue *q, php_io_op *
 	php_io_poll_req *req = ecalloc(1, sizeof(*req));
 	req->op = op;
 	req->data = data;
-	req->heap_idx = PHP_IO_POLL_NOT_IN_HEAP;
 	op->queue = &q->base;
 	op->queue_data = req;
 	op->in_flight = false;
@@ -197,8 +120,9 @@ static void php_io_poll_req_unregister(php_io_poll_queue *q, php_io_poll_req *re
 		req->watching = false;
 		q->n_watching--;
 	}
-	if (req->heap_idx != PHP_IO_POLL_NOT_IN_HEAP) {
-		php_io_poll_heap_remove(q, req);
+	if (req->timer) {
+		php_poll_timer_remove(q->ctx, req->timer);
+		req->timer = NULL;
 	}
 }
 
@@ -258,7 +182,7 @@ static void php_io_poll_req_arm(php_io_poll_queue *q, php_io_poll_req *req)
 
 	if (op->type == PHP_IO_OP_TIMER) {
 		if (!php_deadline_is_infinite(&op->deadline)) {
-			php_io_poll_heap_push(q, req);
+			req->timer = php_poll_timer_add(q->ctx, op->deadline.hrtime, 0, req);
 		}
 		return;
 	}
@@ -283,7 +207,7 @@ static void php_io_poll_req_arm(php_io_poll_queue *q, php_io_poll_req *req)
 	q->n_watching++;
 
 	if (!php_deadline_is_infinite(&op->deadline)) {
-		php_io_poll_heap_push(q, req);
+		req->timer = php_poll_timer_add(q->ctx, op->deadline.hrtime, 0, req);
 	}
 }
 
@@ -466,21 +390,17 @@ static int php_io_poll_queue_wait(php_io_queue *base, php_io_queue_completion *o
 			return (int) php_io_poll_queue_deliver(q, out, max);
 		}
 
-		zend_hrtime_t now = zend_hrtime();
-		zend_hrtime_t until = limit;
-		if (q->heap_size && php_io_poll_req_deadline(q->heap[0]) < until) {
-			until = php_io_poll_req_deadline(q->heap[0]);
-		}
-
-		if (until == ZEND_HRTIME_T_MAX && q->n_watching == 0) {
+		if (limit == ZEND_HRTIME_T_MAX && q->n_watching == 0 && php_poll_timer_count(q->ctx) == 0) {
 			/* Nothing can ever complete: an infinite timer, or nothing at all */
 			errno = EDEADLK;
 			return -1;
 		}
 
+		/* The context bounds the wait by its own timers */
 		struct timespec ts, *pts = NULL;
-		if (until != ZEND_HRTIME_T_MAX) {
-			zend_hrtime_t remaining = until > now ? until - now : 0;
+		if (limit != ZEND_HRTIME_T_MAX) {
+			zend_hrtime_t now = zend_hrtime();
+			zend_hrtime_t remaining = limit > now ? limit - now : 0;
 			ts.tv_sec = remaining / ZEND_NANO_IN_SEC;
 			ts.tv_nsec = remaining % ZEND_NANO_IN_SEC;
 			pts = &ts;
@@ -499,15 +419,19 @@ static int php_io_poll_queue_wait(php_io_queue *base, php_io_queue_completion *o
 
 		for (int i = 0; i < n; i++) {
 			php_io_poll_req *req = q->events[i].data;
-			php_io_status status = req->op->type == PHP_IO_OP_POLL ? PHP_IO_DONE : PHP_IO_READY;
-			php_io_poll_req_complete(q, req, status, q->events[i].revents, 0);
-		}
-
-		now = zend_hrtime();
-		while (q->heap_size && php_io_poll_req_deadline(q->heap[0]) <= now) {
-			php_io_poll_req *req = q->heap[0];
-			php_io_status status = req->op->type == PHP_IO_OP_TIMER ? PHP_IO_DONE : PHP_IO_TIMEOUT;
-			php_io_poll_req_complete(q, req, status, 0, 0);
+			php_io_status status;
+			if (req->ready || req->done) {
+				/* Its deadline and its readiness landed in the same reap */
+				continue;
+			}
+			if (q->events[i].revents & PHP_POLL_TIMER) {
+				/* A fired one-shot timer is disarmed: only remove it */
+				status = req->op->type == PHP_IO_OP_TIMER ? PHP_IO_DONE : PHP_IO_TIMEOUT;
+				php_io_poll_req_complete(q, req, status, 0, 0);
+			} else {
+				status = req->op->type == PHP_IO_OP_POLL ? PHP_IO_DONE : PHP_IO_READY;
+				php_io_poll_req_complete(q, req, status, q->events[i].revents, 0);
+			}
 		}
 
 		php_io_poll_fold_all(q);
@@ -543,12 +467,9 @@ static void php_io_poll_queue_destroy(php_io_queue *base)
 	while (q->outstanding) {
 		php_io_poll_queue_cancel(base, q->outstanding->op);
 	}
-	ZEND_ASSERT(q->pending == 0 && q->n_ready == 0 && q->n_fired == 0 && q->heap_size == 0);
+	ZEND_ASSERT(q->pending == 0 && q->n_ready == 0 && q->n_fired == 0);
 
 	php_poll_destroy(q->ctx);
-	if (q->heap) {
-		efree(q->heap);
-	}
 	if (q->ready) {
 		efree(q->ready);
 	}
