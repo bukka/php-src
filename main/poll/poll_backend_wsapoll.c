@@ -330,6 +330,7 @@ const php_poll_backend_ops php_poll_backend_wsapoll_ops = {
 	.is_available = wsapoll_backend_is_available,
 	.get_suitable_max_events = wsapoll_backend_get_suitable_max_events,
 	.supports_et = false,
+	.supports_priority = false,
 };
 
 #endif /* PHP_WIN32 */

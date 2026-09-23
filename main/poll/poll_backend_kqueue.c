@@ -514,7 +514,8 @@ const php_poll_backend_ops php_poll_backend_kqueue_ops = {
 	.wait = kqueue_backend_wait,
 	.is_available = kqueue_backend_is_available,
 	.get_suitable_max_events = kqueue_backend_get_suitable_max_events,
-	.supports_et = true
+	.supports_et = true,
+	.supports_priority = false
 };
 
 

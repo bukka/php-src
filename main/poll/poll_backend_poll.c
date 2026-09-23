@@ -37,6 +37,9 @@ static uint32_t poll_events_to_native(uint32_t events)
 	if (events & PHP_POLL_HUP) {
 		native |= POLLHUP;
 	}
+	if (events & PHP_POLL_PRI) {
+		native |= POLLPRI;
+	}
 	return native;
 }
 
@@ -57,6 +60,9 @@ static uint32_t poll_events_from_native(uint32_t native)
 	}
 	if (native & POLLNVAL) {
 		events |= PHP_POLL_ERROR; /* Map invalid FD to error */
+	}
+	if (native & POLLPRI) {
+		events |= PHP_POLL_PRI;
 	}
 	return events;
 }
@@ -172,6 +178,11 @@ static bool poll_build_fds_callback(int fd, php_poll_fd_entry *entry, void *user
 {
 	poll_build_context *ctx = (poll_build_context *) user_data;
 
+	/* A fired one-shot registration stays disarmed until it is modified */
+	if (entry->events == 0) {
+		return true;
+	}
+
 	ctx->fds[ctx->index].fd = fd;
 	ctx->fds[ctx->index].events
 			= poll_events_to_native(entry->events & ~(PHP_POLL_ET | PHP_POLL_ONESHOT));
@@ -210,6 +221,13 @@ static int poll_backend_wait(
 	/* Build struct pollfd array from fd_table */
 	poll_build_context build_ctx = { .fds = backend_data->temp_fds, .index = 0 };
 	php_poll_fd_table_foreach(backend_data->fd_table, poll_build_fds_callback, &build_ctx);
+	fd_count = build_ctx.index;
+	if (fd_count == 0) {
+		if (timeout != NULL && (timeout->tv_sec > 0 || timeout->tv_nsec > 0)) {
+			nanosleep(timeout, NULL);
+		}
+		return 0;
+	}
 
 	/* Convert timespec to milliseconds (poll() only supports ms resolution) */
 	int timeout_ms = php_poll_timespec_to_ms(timeout);
@@ -245,11 +263,12 @@ static int poll_backend_wait(
 		}
 	}
 
-	/* Handle oneshot removals */
+	/* A fired one-shot registration is disarmed, not dropped, so that a
+	 * modify can re-arm it as on epoll */
 	for (int i = 0; i < event_count; i++) {
 		php_poll_fd_entry *entry = php_poll_fd_table_find(backend_data->fd_table, events[i].fd);
 		if (entry && (entry->events & PHP_POLL_ONESHOT) && events[i].revents != 0) {
-			php_poll_fd_table_remove(backend_data->fd_table, events[i].fd);
+			entry->events = 0;
 		}
 	}
 
@@ -285,6 +304,7 @@ const php_poll_backend_ops php_poll_backend_poll_ops = {
 	.is_available = poll_backend_is_available,
 	.get_suitable_max_events = poll_backend_get_suitable_max_events,
 	.supports_et = false,
+	.supports_priority = true,
 };
 
 #endif

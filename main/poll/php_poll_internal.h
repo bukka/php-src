@@ -57,7 +57,17 @@ typedef struct php_poll_backend_ops {
 
 	/* Backend supports edge triggering natively */
 	bool supports_et;
+
+	/* Backend reports priority data (POLLPRI) */
+	bool supports_priority;
 } php_poll_backend_ops;
+
+struct php_poll_timer {
+	zend_hrtime_t deadline;
+	zend_hrtime_t period;
+	void *data;
+	uint32_t heap_idx;          /* UINT32_MAX while disarmed */
+};
 
 /* Main poll context */
 struct php_poll_ctx {
@@ -75,6 +85,11 @@ struct php_poll_ctx {
 
 	/* Backend-specific data */
 	void *backend_data;
+
+	/* Deadline heap of the armed timers */
+	php_poll_timer **timers;
+	uint32_t timer_count;
+	uint32_t timer_cap;
 };
 
 /* Generic FD entry structure */

@@ -15,6 +15,8 @@
 #ifndef PHP_POLL_H
 #define PHP_POLL_H
 
+#include "Zend/zend_hrtime.h"
+
 #include "php.h"
 #include "php_network.h"
 
@@ -32,6 +34,9 @@
 #define PHP_POLL_RDHUP   0x10
 #define PHP_POLL_ONESHOT 0x20
 #define PHP_POLL_ET      0x40 /* Edge-triggered */
+#define PHP_POLL_PRI     0x80 /* Priority data, backend dependent */
+#define PHP_POLL_TIMER   0x100 /* A timer of the context fired */
+#define PHP_POLL_NOTIFY  0x200 /* A notification handle is raised */
 
 /* Poll flags */
 #define PHP_POLL_FLAG_PERSISTENT 0x01
@@ -94,6 +99,7 @@ typedef struct php_poll_event php_poll_event;
 
 PHPAPI bool php_poll_is_backend_available(php_poll_backend_type backend);
 PHPAPI bool php_poll_backend_supports_edge_triggering(php_poll_backend_type backend);
+PHPAPI bool php_poll_backend_supports_priority(php_poll_backend_type backend);
 
 PHPAPI php_poll_ctx *php_poll_create(php_poll_backend_type preferred_backend, uint32_t flags);
 PHPAPI php_poll_ctx *php_poll_create_by_name(const char *preferred_backend, uint32_t flags);
@@ -109,9 +115,23 @@ PHPAPI zend_result php_poll_remove(php_poll_ctx *ctx, int fd);
 PHPAPI int php_poll_wait(php_poll_ctx *ctx, php_poll_event *events, int max_events,
 		const struct timespec *timeout);
 
+/* Timers: deadline heap entries of the context, reported by php_poll_wait()
+ * as events with fd -1 and PHP_POLL_TIMER in revents, before descriptor
+ * events. Deadlines are zend_hrtime() values. A period of 0 is a one-shot
+ * timer, which stays registered but disarmed after it fired until it is
+ * modified or removed; a periodic timer re-arms from its previous deadline. */
+typedef struct php_poll_timer php_poll_timer;
+
+PHPAPI php_poll_timer *php_poll_timer_add(php_poll_ctx *ctx, zend_hrtime_t deadline, zend_hrtime_t period, void *data);
+PHPAPI zend_result php_poll_timer_modify(php_poll_ctx *ctx, php_poll_timer *timer, zend_hrtime_t deadline, zend_hrtime_t period, void *data);
+PHPAPI void php_poll_timer_remove(php_poll_ctx *ctx, php_poll_timer *timer);
+/* Armed timers */
+PHPAPI uint32_t php_poll_timer_count(php_poll_ctx *ctx);
+
 PHPAPI const char *php_poll_backend_name(php_poll_ctx *ctx);
 PHPAPI php_poll_backend_type php_poll_get_backend_type(php_poll_ctx *ctx);
 PHPAPI bool php_poll_supports_et(php_poll_ctx *ctx);
+PHPAPI bool php_poll_supports_priority(php_poll_ctx *ctx);
 PHPAPI php_poll_error php_poll_get_error(php_poll_ctx *ctx);
 
 /* Get suitable max_events for backend */
