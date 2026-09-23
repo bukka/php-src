@@ -14,7 +14,19 @@ class Scheduler implements \Io\Hooks\Hooks
 
     public function __construct(?\Io\OperationQueue $queue = null)
     {
-        $this->queue = $queue ?? new \Io\Poll\OperationQueue();
+        $this->queue = $queue ?? self::defaultQueue();
+    }
+
+    /* IO_HOOKS_QUEUE=ring runs the same tests on Io\Ring\Engine */
+    public static function defaultQueue(): \Io\OperationQueue
+    {
+        if (getenv('IO_HOOKS_QUEUE') === 'ring') {
+            if (!class_exists(\Io\Ring\Engine::class)) {
+                die("skip Io\\Ring\\Engine not available\n");
+            }
+            return new \Io\Ring\Engine();
+        }
+        return new \Io\Poll\OperationQueue();
     }
 
     /** Schedule a task; it starts on the next pass of loop(). */
