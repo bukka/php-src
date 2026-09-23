@@ -4,7 +4,7 @@
  * Io\OperationQueue. The Hooks methods are called by the core from inside
  * blocking functions, on the fiber that runs them; spawn() and loop() are
  * what the script calls. */
-final class Scheduler implements \Io\Hooks\Hooks
+class Scheduler implements \Io\Hooks\Hooks
 {
     /** Fibers to resume, with the value: null to start, a Completion to continue. */
     private array $ready = [];

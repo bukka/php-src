@@ -20,6 +20,11 @@ for ($i = 0; $i < 100; $i++) {
 }
 */
 
+// The first transfer creates the request's IO state, so warm up first
+curl_setopt($ch, CURLOPT_URL, "{$host}/get.inc");
+curl_setopt($ch, CURLOPT_FILE, $fp);
+curl_exec($ch);
+
 // Start actual test
 $start = memory_get_usage() + 1024;
 for($i = 0; $i < 1024; $i++) {
