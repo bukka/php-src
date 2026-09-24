@@ -546,6 +546,15 @@ static void php_io_op_register_persistent(php_io_op *op)
 
 static php_io_queue *php_io_core_queue(void)
 {
+#ifndef PHP_WIN32
+	if (FG(io_queue) && FG(io_queue_pid) != getpid()) {
+		/* Inherited across fork: its context is inert here (nothing was in
+		 * flight, the fork guard saw to that), so it is dropped for a new one */
+		php_io_queue *q = FG(io_queue);
+		FG(io_queue) = NULL;
+		q->ops->destroy(q);
+	}
+#endif
 	if (!FG(io_queue)) {
 		/* poll(2) handles regular files and needs no registration syscalls for
 		 * the one-shot waits of the synchronous path */
@@ -553,6 +562,9 @@ static php_io_queue *php_io_core_queue(void)
 		if (!FG(io_queue)) {
 			FG(io_queue) = php_io_queue_create_poll(PHP_POLL_BACKEND_AUTO);
 		}
+#ifndef PHP_WIN32
+		FG(io_queue_pid) = getpid();
+#endif
 	}
 	return FG(io_queue);
 }

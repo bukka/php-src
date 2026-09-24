@@ -104,6 +104,7 @@ typedef struct {
 	int pclose_wait;
 	struct _php_io_hooks_state *io_hooks; /* main/hooks/io_hooks.h, NULL when no provider is installed */
 	struct _php_io_queue *io_queue;       /* the core's queue for the no-hooks path, created lazily */
+	pid_t io_queue_pid;                   /* the process that created it: a forked child gets a fresh one */
 	struct _php_io_persistent_op *io_persistent_ops; /* every persistent op of the request */
 	uint32_t io_ops_in_flight;            /* active php_io_run() frames */
 	HashTable *io_orphans;                /* stream pointer key -> php_io_queue, ops kept by a queue past their frame */
