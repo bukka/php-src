@@ -11,11 +11,11 @@
 */
 
 #include "php.h"
-#include "main/ring/php_io_ring.h"
+#include "main/php_io_ring.h"
 
 #ifdef HAVE_IOR
 
-#include <ior/ior.h>
+#include <ior.h>
 #include <errno.h>
 #ifndef PHP_WIN32
 # include <netdb.h>

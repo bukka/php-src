@@ -10,8 +10,8 @@
    +----------------------------------------------------------------------+
 */
 
-#ifndef PHP_HOOKS_IO_HOOKS_H
-#define PHP_HOOKS_IO_HOOKS_H
+#ifndef PHP_IO_HOOKS_H
+#define PHP_IO_HOOKS_H
 
 #include "php.h"
 #include "php_network.h"
@@ -307,4 +307,4 @@ static inline zend_hrtime_t php_io_deadline_remaining(const php_deadline *dl, ze
 
 END_EXTERN_C()
 
-#endif /* PHP_HOOKS_IO_HOOKS_H */
+#endif /* PHP_IO_HOOKS_H */

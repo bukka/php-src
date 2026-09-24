@@ -776,7 +776,7 @@ AS_VAR_IF([PHP_IOR], [no],, [
   PHP_EVAL_INCLINE([$IOR_CFLAGS])
   PHP_EVAL_LIBLINE([$IOR_LIBS])
   AC_DEFINE([HAVE_IOR], [1], [Define to 1 if the ior library is available.])
-  PHP_ADD_SOURCES([main/ring], [php_io_ring.c],
+  PHP_ADD_SOURCES([main/io], [php_io_ring.c],
     [-DZEND_ENABLE_STATIC_TSRMLS_CACHE=1])
 ])
 
@@ -1722,6 +1722,8 @@ PHP_ADD_SOURCES([main/io], m4_normalize([
     php_io_copy_freebsd.c
     php_io_copy_solaris.c
     php_io_copy_macos.c
+    php_io_hooks.c
+    php_io_queue_poll.c
   ]),
   [-DZEND_ENABLE_STATIC_TSRMLS_CACHE=1])
 
@@ -1735,9 +1737,6 @@ PHP_ADD_SOURCES([main/poll], m4_normalize([
     poll_handle.c
     poll_source.c
   ]),
-  [-DZEND_ENABLE_STATIC_TSRMLS_CACHE=1])
-
-PHP_ADD_SOURCES([main/hooks], [io_hooks.c io_queue_poll.c],
   [-DZEND_ENABLE_STATIC_TSRMLS_CACHE=1])
 
 PHP_ADD_SOURCES([main/streams], m4_normalize([

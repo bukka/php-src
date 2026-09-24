@@ -23,7 +23,7 @@
  * between runs it stays disarmed. */
 
 #include "php.h"
-#include "main/hooks/io_hooks.h"
+#include "main/php_io_hooks.h"
 #include "main/php_poll.h"
 
 #include <errno.h>

@@ -20,7 +20,7 @@
 #include "php_ini.h"
 #include "streamsfuncs.h"
 #include "php_network.h"
-#include "main/hooks/io_hooks.h"
+#include "main/php_io_hooks.h"
 #include "ext/standard/io_poll.h"
 #include "php_string.h"
 #include "streams/php_streams_int.h"

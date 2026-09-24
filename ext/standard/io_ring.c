@@ -11,7 +11,7 @@
 */
 
 /* Io\Ring\Engine: the Ring as an Io\OperationQueue, over the C ring queue
- * of main/ring. The queue methods are the shared implementation of
+ * of main/io. The queue methods are the shared implementation of
  * ext/standard/io_hooks.c; this file adds what only a ring has. */
 
 #include "php.h"
@@ -20,7 +20,7 @@
 #include "ext/standard/file.h"
 #include "ext/standard/io_poll.h"
 #include "ext/standard/io_hooks.h"
-#include "main/ring/php_io_ring.h"
+#include "main/php_io_ring.h"
 
 #include <errno.h>
 

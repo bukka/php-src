@@ -1,5 +1,5 @@
 name: Build ior
-# Temporary, for the IO hooks proof of concept only: the ring (main/ring)
+# Temporary, for the IO hooks proof of concept only: the ring (main/io/php_io_ring.c)
 # is built on the ior library, which will be bundled with php-src once the
 # design settles. Until then CI fetches it from its repository and builds it
 # into a prefix that ./configure finds through pkg-config (--with-ior).

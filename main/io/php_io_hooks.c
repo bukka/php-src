@@ -11,7 +11,7 @@
 */
 
 #include "php.h"
-#include "main/hooks/io_hooks.h"
+#include "main/php_io_hooks.h"
 #include "ext/standard/file.h"
 #include "ext/standard/io_poll.h"
 

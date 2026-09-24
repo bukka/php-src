@@ -191,7 +191,7 @@ struct _php_stream_wrapper	{
 
 #define PHP_STREAM_FLAG_NO_IO						0x400
 
-/* Set while an operation on the stream is in flight (main/hooks/io_hooks.h).
+/* Set while an operation on the stream is in flight (main/php_io_hooks.h).
  * Any attempt to use the stream as a parameter during this window is a
  * concurrent-access bug and throws an Error. */
 #define PHP_STREAM_FLAG_IN_USE						0x800

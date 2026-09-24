@@ -19,7 +19,7 @@
 #endif
 
 #include "php.h"
-#include "main/hooks/io_hooks.h"
+#include "main/php_io_hooks.h"
 #include "Zend/zend_smart_str.h"
 
 #include "curl_private.h"

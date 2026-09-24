@@ -10,10 +10,10 @@
    +----------------------------------------------------------------------+
 */
 
-#ifndef PHP_IO_HOOKS_H
-#define PHP_IO_HOOKS_H
+#ifndef PHP_STANDARD_IO_HOOKS_H
+#define PHP_STANDARD_IO_HOOKS_H
 
-#include "main/hooks/io_hooks.h"
+#include "main/php_io_hooks.h"
 
 BEGIN_EXTERN_C()
 
@@ -41,4 +41,4 @@ PHP_MINIT_FUNCTION(io_hooks);
 
 END_EXTERN_C()
 
-#endif /* PHP_IO_HOOKS_H */
+#endif /* PHP_STANDARD_IO_HOOKS_H */

@@ -23,7 +23,7 @@
 #include "ext/date/php_time.h"
 #include "zend_interfaces.h"
 
-#include "main/hooks/io_hooks.h"
+#include "main/php_io_hooks.h"
 #include "ext/standard/proc_open.h"
 
 #include <fcntl.h>

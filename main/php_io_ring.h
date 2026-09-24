@@ -10,11 +10,11 @@
    +----------------------------------------------------------------------+
 */
 
-#ifndef PHP_RING_PHP_IO_RING_H
-#define PHP_RING_PHP_IO_RING_H
+#ifndef PHP_IO_RING_H
+#define PHP_IO_RING_H
 
 #include "php.h"
-#include "main/hooks/io_hooks.h"
+#include "main/php_io_hooks.h"
 
 #ifdef HAVE_IOR
 
@@ -71,4 +71,4 @@ END_EXTERN_C()
 
 #endif /* HAVE_IOR */
 
-#endif /* PHP_RING_PHP_IO_RING_H */
+#endif /* PHP_IO_RING_H */
