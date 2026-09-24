@@ -154,6 +154,29 @@ namespace Io\Operation {
         public function isDataOnly(): bool {}
     }
 
+    /** A name lookup; no handle. */
+    final class GetAddrInfo extends \Io\Operation
+    {
+        public function getHost(): string {}
+
+        public function getService(): ?string {}
+
+        /**
+         * Complete with resolved addresses from a userland resolver; the
+         * core builds the address list. @param list<string> $addresses IPs
+         */
+        public function completeWithAddresses(array $addresses): \Io\Completion {}
+    }
+
+    /** A reverse lookup; no handle. */
+    final class GetNameInfo extends \Io\Operation
+    {
+        /** Textual, as stream_socket_get_name() */
+        public function getAddress(): string {}
+
+        public function completeWithName(string $host, ?string $service = null): \Io\Completion {}
+    }
+
     /** Wait on several Poll and Timer operations at once. */
     final class Any extends \Io\Operation
     {

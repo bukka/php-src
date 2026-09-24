@@ -26,6 +26,8 @@
 #include "io_hooks_decl.h"
 
 #include <errno.h>
+#include <netdb.h>
+#include <arpa/inet.h>
 
 static zend_class_entry *php_io_completion_status_ce;
 static zend_class_entry *php_io_operation_ce;
@@ -39,6 +41,8 @@ static zend_class_entry *php_io_operation_send_ce;
 static zend_class_entry *php_io_operation_accept_ce;
 static zend_class_entry *php_io_operation_connect_ce;
 static zend_class_entry *php_io_operation_fsync_ce;
+static zend_class_entry *php_io_operation_getaddrinfo_ce;
+static zend_class_entry *php_io_operation_getnameinfo_ce;
 static zend_class_entry *php_io_completion_ce;
 static zend_class_entry *php_io_invalid_operation_exception_ce;
 PHPAPI zend_class_entry *php_io_operation_queue_ce;
@@ -129,6 +133,8 @@ static zend_class_entry *php_io_operation_ce_for(php_io_op_type type)
 		case PHP_IO_OP_ACCEPT: return php_io_operation_accept_ce;
 		case PHP_IO_OP_CONNECT: return php_io_operation_connect_ce;
 		case PHP_IO_OP_FSYNC: return php_io_operation_fsync_ce;
+		case PHP_IO_OP_GETADDRINFO: return php_io_operation_getaddrinfo_ce;
+		case PHP_IO_OP_GETNAMEINFO: return php_io_operation_getnameinfo_ce;
 		default: return php_io_operation_ce;
 	}
 }
@@ -397,6 +403,156 @@ PHP_METHOD(Io_Operation_Connect, getAddress)
 		RETURN_EMPTY_STRING();
 	}
 	RETURN_STR(textaddr);
+}
+
+/* DNS operations */
+
+PHP_METHOD(Io_Operation_GetAddrInfo, getHost)
+{
+	ZEND_PARSE_PARAMETERS_NONE();
+	php_io_op *op = php_io_operation_fetch_type(ZEND_THIS, PHP_IO_OP_GETADDRINFO);
+	if (!op) {
+		RETURN_THROWS();
+	}
+	RETURN_STRING(op->u.getaddrinfo.node ? op->u.getaddrinfo.node : "");
+}
+
+PHP_METHOD(Io_Operation_GetAddrInfo, getService)
+{
+	ZEND_PARSE_PARAMETERS_NONE();
+	php_io_op *op = php_io_operation_fetch_type(ZEND_THIS, PHP_IO_OP_GETADDRINFO);
+	if (!op) {
+		RETURN_THROWS();
+	}
+	if (!op->u.getaddrinfo.service) {
+		RETURN_NULL();
+	}
+	RETURN_STRING(op->u.getaddrinfo.service);
+}
+
+/* The list is built the way the C library builds its own, one block per
+ * entry with the address behind the addrinfo, so freeaddrinfo() frees it */
+PHP_METHOD(Io_Operation_GetAddrInfo, completeWithAddresses)
+{
+	zval *addresses;
+
+	ZEND_PARSE_PARAMETERS_START(1, 1)
+		Z_PARAM_ARRAY(addresses)
+	ZEND_PARSE_PARAMETERS_END();
+
+	php_io_op *op = php_io_operation_fetch_type(ZEND_THIS, PHP_IO_OP_GETADDRINFO);
+	if (!op) {
+		RETURN_THROWS();
+	}
+
+	const struct addrinfo *hints = op->u.getaddrinfo.hints;
+	struct addrinfo *head = NULL, **tail = &head;
+	zval *entry;
+	ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(addresses), entry) {
+		if (Z_TYPE_P(entry) != IS_STRING) {
+			zend_argument_type_error(1, "must be a list of IP address strings");
+			goto fail;
+		}
+		struct sockaddr_storage ss;
+		socklen_t len;
+		memset(&ss, 0, sizeof(ss));
+		if (inet_pton(AF_INET, Z_STRVAL_P(entry), &((struct sockaddr_in *) &ss)->sin_addr) == 1) {
+			ss.ss_family = AF_INET;
+			len = sizeof(struct sockaddr_in);
+#ifdef HAVE_IPV6
+		} else if (inet_pton(AF_INET6, Z_STRVAL_P(entry), &((struct sockaddr_in6 *) &ss)->sin6_addr) == 1) {
+			ss.ss_family = AF_INET6;
+			len = sizeof(struct sockaddr_in6);
+#endif
+		} else {
+			zend_argument_value_error(1, "must contain valid IP addresses, \"%s\" given", Z_STRVAL_P(entry));
+			goto fail;
+		}
+		if (hints && hints->ai_family != AF_UNSPEC && hints->ai_family != ss.ss_family) {
+			/* Not asked for: skip it */
+			continue;
+		}
+		struct addrinfo *ai = malloc(sizeof(struct addrinfo) + len);
+		if (!ai) {
+			zend_throw_error(NULL, "Out of memory");
+			goto fail;
+		}
+		memset(ai, 0, sizeof(*ai));
+		ai->ai_family = ss.ss_family;
+		ai->ai_socktype = hints ? hints->ai_socktype : SOCK_STREAM;
+		ai->ai_protocol = hints ? hints->ai_protocol : 0;
+		ai->ai_addrlen = len;
+		ai->ai_addr = (struct sockaddr *) (ai + 1);
+		memcpy(ai->ai_addr, &ss, len);
+		*tail = ai;
+		tail = &ai->ai_next;
+	} ZEND_HASH_FOREACH_END();
+
+	if (!head) {
+		php_io_completion_create(return_value, op, Z_OBJ_P(ZEND_THIS), PHP_IO_DONE, -1, EAI_NONAME, NULL, NULL);
+		return;
+	}
+	*op->u.getaddrinfo.res = head;
+	php_io_completion_create(return_value, op, Z_OBJ_P(ZEND_THIS), PHP_IO_DONE, 0, 0, NULL, NULL);
+	return;
+
+fail:
+	if (head) {
+		freeaddrinfo(head);
+	}
+	RETURN_THROWS();
+}
+
+PHP_METHOD(Io_Operation_GetNameInfo, getAddress)
+{
+	ZEND_PARSE_PARAMETERS_NONE();
+	php_io_op *op = php_io_operation_fetch_type(ZEND_THIS, PHP_IO_OP_GETNAMEINFO);
+	if (!op) {
+		RETURN_THROWS();
+	}
+	zend_string *textaddr = NULL;
+	php_network_populate_name_from_sockaddr((struct sockaddr *) op->u.getnameinfo.addr, op->u.getnameinfo.addrlen,
+			&textaddr, NULL, NULL);
+	if (!textaddr) {
+		RETURN_EMPTY_STRING();
+	}
+	RETURN_STR(textaddr);
+}
+
+PHP_METHOD(Io_Operation_GetNameInfo, completeWithName)
+{
+	zend_string *host, *service = NULL;
+
+	ZEND_PARSE_PARAMETERS_START(1, 2)
+		Z_PARAM_STR(host)
+		Z_PARAM_OPTIONAL
+		Z_PARAM_STR_OR_NULL(service)
+	ZEND_PARSE_PARAMETERS_END();
+
+	php_io_op *op = php_io_operation_fetch_type(ZEND_THIS, PHP_IO_OP_GETNAMEINFO);
+	if (!op) {
+		RETURN_THROWS();
+	}
+	if (op->u.getnameinfo.host && op->u.getnameinfo.hostlen) {
+		if (ZSTR_LEN(host) >= op->u.getnameinfo.hostlen) {
+			php_io_completion_create(return_value, op, Z_OBJ_P(ZEND_THIS), PHP_IO_DONE, -1, EAI_OVERFLOW, NULL, NULL);
+			return;
+		}
+		memcpy(op->u.getnameinfo.host, ZSTR_VAL(host), ZSTR_LEN(host) + 1);
+	}
+	if (op->u.getnameinfo.service && op->u.getnameinfo.servicelen) {
+		size_t len = service ? ZSTR_LEN(service) : 0;
+		if (len >= op->u.getnameinfo.servicelen) {
+			php_io_completion_create(return_value, op, Z_OBJ_P(ZEND_THIS), PHP_IO_DONE, -1, EAI_OVERFLOW, NULL, NULL);
+			return;
+		}
+		if (service) {
+			memcpy(op->u.getnameinfo.service, ZSTR_VAL(service), len + 1);
+		} else {
+			op->u.getnameinfo.service[0] = '\0';
+		}
+	}
+	php_io_completion_create(return_value, op, Z_OBJ_P(ZEND_THIS), PHP_IO_DONE, 0, 0, NULL, NULL);
 }
 
 /* Io\Operation\Any */
@@ -1128,6 +1284,8 @@ PHP_MINIT_FUNCTION(io_hooks)
 	PHP_IO_REGISTER_DATA_OP(php_io_operation_accept_ce, Accept);
 	PHP_IO_REGISTER_DATA_OP(php_io_operation_connect_ce, Connect);
 	PHP_IO_REGISTER_DATA_OP(php_io_operation_fsync_ce, Fsync);
+	PHP_IO_REGISTER_DATA_OP(php_io_operation_getaddrinfo_ce, GetAddrInfo);
+	PHP_IO_REGISTER_DATA_OP(php_io_operation_getnameinfo_ce, GetNameInfo);
 #undef PHP_IO_REGISTER_DATA_OP
 
 	php_io_completion_ce = register_class_Io_Completion();

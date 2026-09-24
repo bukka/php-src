@@ -19,6 +19,7 @@
 #endif
 
 #include "php.h"
+#include "main/hooks/io_hooks.h"
 #include "Zend/zend_smart_str.h"
 
 #include "curl_private.h"
@@ -214,6 +215,65 @@ PHP_FUNCTION(curl_multi_select)
 	if (!(timeout >= 0.0 && timeout <= (INT_MAX / 1000.0))) {
 		zend_argument_value_error(2, "must be between 0 and %f", INT_MAX / 1000.0);
 		RETURN_THROWS();
+	}
+
+	if (php_io_hooks_active()) {
+		/* An Any over the multi's descriptors, bounded by the shorter of the
+		 * caller's timeout and libcurl's own. These sockets have no handle:
+		 * a user multi handle installs no socket callback that could keep
+		 * one, so a provider that needs identity completes it Unsupported and
+		 * the core waits itself. */
+		fd_set rfds, wfds, efds;
+		int maxfd = -1;
+		FD_ZERO(&rfds);
+		FD_ZERO(&wfds);
+		FD_ZERO(&efds);
+		error = curl_multi_fdset(mh->multi, &rfds, &wfds, &efds, &maxfd);
+		if (CURLM_OK != error) {
+			SAVE_CURLM_ERROR(mh, error);
+			RETURN_LONG(-1);
+		}
+		long wait_ms = (long) (timeout * 1000.0);
+		long curl_ms = -1;
+		if (curl_multi_timeout(mh->multi, &curl_ms) == CURLM_OK && curl_ms >= 0 && curl_ms < wait_ms) {
+			wait_ms = curl_ms;
+		}
+
+		uint32_t n = 0;
+		php_io_op *ops = safe_emalloc(maxfd + 2, sizeof(php_io_op), 0);
+		php_io_op **op_ptrs = safe_emalloc(maxfd + 2, sizeof(php_io_op *), 0);
+		php_io_op_result *results = safe_emalloc(maxfd + 2, sizeof(php_io_op_result), 0);
+		for (int fd = 0; fd <= maxfd; fd++) {
+			uint32_t events = (FD_ISSET(fd, &rfds) ? PHP_POLL_READ : 0) | (FD_ISSET(fd, &wfds) ? PHP_POLL_WRITE : 0);
+			if (!events && !FD_ISSET(fd, &efds)) {
+				continue;
+			}
+			php_io_op_poll(&ops[n], NULL, (php_socket_t) fd, events ? events : PHP_POLL_READ, php_io_deadline_infinite());
+			op_ptrs[n] = &ops[n];
+			n++;
+		}
+		php_io_op_timer(&ops[n], php_io_deadline_from_ms(wait_ms));
+		op_ptrs[n] = &ops[n];
+		uint32_t timer_index = n++;
+
+		php_io_op any;
+		php_io_op_result any_result;
+		php_io_op_any(&any, op_ptrs, n, results);
+		zend_result rc = php_io_run(&any, &any_result);
+		if (rc == SUCCESS) {
+			for (uint32_t i = 0; i < any.u.any.n_results; i++) {
+				if (results[i].index != timer_index && (results[i].status == PHP_IO_DONE || results[i].status == PHP_IO_READY)) {
+					numfds++;
+				}
+			}
+		}
+		efree(results);
+		efree(op_ptrs);
+		efree(ops);
+		if (rc == FAILURE) {
+			RETURN_LONG(-1);
+		}
+		RETURN_LONG(numfds);
 	}
 
 	error = curl_multi_wait(mh->multi, NULL, 0, (int) (timeout * 1000.0), &numfds);

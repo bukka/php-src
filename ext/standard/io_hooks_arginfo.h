@@ -1,5 +1,5 @@
 /* This is a generated file, edit io_hooks.stub.php instead.
- * Stub hash: dcddf3c14368503b63ffb0daa503fe728c9136d0
+ * Stub hash: 017285c42f4a672145ede1a3a5f18b5ec1526b82
  * Has decl header: yes */
 
 #include "zend_enum.h"
@@ -103,6 +103,22 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_Io_Operation_Fsync_isDataOnly arginfo_Io_Hooks_is_active
 
+#define arginfo_class_Io_Operation_GetAddrInfo_getHost arginfo_class_Io_Operation_Connect_getAddress
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Io_Operation_GetAddrInfo_getService, 0, 0, IS_STRING, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Io_Operation_GetAddrInfo_completeWithAddresses, 0, 1, Io\\Completion, 0)
+	ZEND_ARG_TYPE_INFO(0, addresses, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_Io_Operation_GetNameInfo_getAddress arginfo_class_Io_Operation_Connect_getAddress
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Io_Operation_GetNameInfo_completeWithName, 0, 1, Io\\Completion, 0)
+	ZEND_ARG_TYPE_INFO(0, host, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, service, IS_STRING, 1, "null")
+ZEND_END_ARG_INFO()
+
 #define arginfo_class_Io_Operation_Any_getOperations arginfo_class_Io_Operation_getEvents
 
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Io_Operation_Any_completeWith, 0, 1, Io\\Completion, 0)
@@ -169,6 +185,11 @@ ZEND_METHOD(Io_Operation_Send, getLength);
 ZEND_METHOD(Io_Operation_Send, getFlags);
 ZEND_METHOD(Io_Operation_Connect, getAddress);
 ZEND_METHOD(Io_Operation_Fsync, isDataOnly);
+ZEND_METHOD(Io_Operation_GetAddrInfo, getHost);
+ZEND_METHOD(Io_Operation_GetAddrInfo, getService);
+ZEND_METHOD(Io_Operation_GetAddrInfo, completeWithAddresses);
+ZEND_METHOD(Io_Operation_GetNameInfo, getAddress);
+ZEND_METHOD(Io_Operation_GetNameInfo, completeWithName);
 ZEND_METHOD(Io_Operation_Any, getOperations);
 ZEND_METHOD(Io_Operation_Any, completeWith);
 ZEND_METHOD(Io_Poll_OperationQueue, __construct);
@@ -258,6 +279,19 @@ static const zend_function_entry class_Io_Operation_Connect_methods[] = {
 
 static const zend_function_entry class_Io_Operation_Fsync_methods[] = {
 	ZEND_ME(Io_Operation_Fsync, isDataOnly, arginfo_class_Io_Operation_Fsync_isDataOnly, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_Io_Operation_GetAddrInfo_methods[] = {
+	ZEND_ME(Io_Operation_GetAddrInfo, getHost, arginfo_class_Io_Operation_GetAddrInfo_getHost, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Operation_GetAddrInfo, getService, arginfo_class_Io_Operation_GetAddrInfo_getService, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Operation_GetAddrInfo, completeWithAddresses, arginfo_class_Io_Operation_GetAddrInfo_completeWithAddresses, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_Io_Operation_GetNameInfo_methods[] = {
+	ZEND_ME(Io_Operation_GetNameInfo, getAddress, arginfo_class_Io_Operation_GetNameInfo_getAddress, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Operation_GetNameInfo, completeWithName, arginfo_class_Io_Operation_GetNameInfo_completeWithName, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 
@@ -432,6 +466,26 @@ static zend_class_entry *register_class_Io_Operation_Fsync(zend_class_entry *cla
 	zend_class_entry ce, *class_entry;
 
 	INIT_NS_CLASS_ENTRY(ce, "Io\\Operation", "Fsync", class_Io_Operation_Fsync_methods);
+	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Io_Operation, ZEND_ACC_FINAL);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_Io_Operation_GetAddrInfo(zend_class_entry *class_entry_Io_Operation)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "Io\\Operation", "GetAddrInfo", class_Io_Operation_GetAddrInfo_methods);
+	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Io_Operation, ZEND_ACC_FINAL);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_Io_Operation_GetNameInfo(zend_class_entry *class_entry_Io_Operation)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "Io\\Operation", "GetNameInfo", class_Io_Operation_GetNameInfo_methods);
 	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Io_Operation, ZEND_ACC_FINAL);
 
 	return class_entry;

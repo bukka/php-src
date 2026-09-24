@@ -20,6 +20,8 @@
 #include "php_ini.h"
 #include "streamsfuncs.h"
 #include "php_network.h"
+#include "main/hooks/io_hooks.h"
+#include "ext/standard/io_poll.h"
 #include "php_string.h"
 #include "streams/php_streams_int.h"
 #ifdef HAVE_UNISTD_H
@@ -683,6 +685,148 @@ static int stream_array_to_fd_set(const HashTable *stream_array, fd_set *fds, ph
 	return cnt ? 1 : 0;
 }
 
+/* stream_select() under a provider: one Poll member per stream with the
+ * events of the sets it is in, a Timer member for the timeout, and the
+ * reported members put back into the fd sets for the usual filtering. */
+typedef struct {
+	php_stream *stream;
+	php_socket_t fd;
+	uint32_t events;
+} php_select_member;
+
+static void stream_array_collect_members(HashTable *stream_array, uint32_t events,
+		php_select_member **members, uint32_t *n, uint32_t *cap)
+{
+	zval *elem;
+	php_stream *stream;
+
+	ZEND_HASH_FOREACH_VAL(stream_array, elem) {
+		php_socket_t this_fd;
+		ZVAL_DEREF(elem);
+		php_stream_from_zval_no_verify(stream, elem);
+		if (stream == NULL) {
+			continue;
+		}
+		if (php_stream_cast(stream, PHP_STREAM_AS_FD_FOR_SELECT | PHP_STREAM_CAST_INTERNAL, (void*)&this_fd, 1) != SUCCESS || this_fd == -1) {
+			continue;
+		}
+		bool merged = false;
+		for (uint32_t i = 0; i < *n; i++) {
+			if ((*members)[i].fd == this_fd) {
+				(*members)[i].events |= events;
+				merged = true;
+				break;
+			}
+		}
+		if (!merged) {
+			if (*n == *cap) {
+				*cap = *cap ? *cap * 2 : 8;
+				*members = safe_erealloc(*members, *cap, sizeof(**members), 0);
+			}
+			(*members)[*n].stream = stream;
+			(*members)[*n].fd = this_fd;
+			(*members)[*n].events = events;
+			(*n)++;
+		}
+	} ZEND_HASH_FOREACH_END();
+}
+
+/* Returns the number of ready descriptors, 0 on timeout, -1 with errno */
+static int stream_select_any(zval *r_array, zval *w_array, zval *e_array, struct timeval *tv,
+		fd_set *rfds, fd_set *wfds, fd_set *efds)
+{
+	php_select_member *members = NULL;
+	uint32_t n = 0, cap = 0;
+	bool priority = php_poll_backend_supports_priority(PHP_POLL_BACKEND_AUTO);
+
+	if (r_array) {
+		stream_array_collect_members(Z_ARRVAL_P(r_array), PHP_POLL_READ, &members, &n, &cap);
+	}
+	if (w_array) {
+		stream_array_collect_members(Z_ARRVAL_P(w_array), PHP_POLL_WRITE, &members, &n, &cap);
+	}
+	if (e_array) {
+		stream_array_collect_members(Z_ARRVAL_P(e_array), priority ? PHP_POLL_PRI : 0, &members, &n, &cap);
+	}
+
+	php_io_op *ops = safe_emalloc(n + 1, sizeof(php_io_op), 0);
+	php_io_op **op_ptrs = safe_emalloc(n + 1, sizeof(php_io_op *), 0);
+	php_io_op_result *results = safe_emalloc(n + 1, sizeof(php_io_op_result), 0);
+	zend_object **handles = safe_emalloc(n + 1, sizeof(zend_object *), 0);
+	uint32_t n_members = 0;
+
+	for (uint32_t i = 0; i < n; i++) {
+		if (members[i].events == 0) {
+			/* Only in the except set on a backend without priority events */
+			handles[n_members] = NULL;
+			continue;
+		}
+		zval handle_zv;
+		php_stream_poll_weak_handle_from_stream(&handle_zv, members[i].stream);
+		handles[n_members] = Z_OBJ(handle_zv);
+		php_io_op_poll(&ops[n_members], handles[n_members], members[i].fd, members[i].events, php_io_deadline_infinite());
+		op_ptrs[n_members] = &ops[n_members];
+		n_members++;
+	}
+	uint32_t n_polls = n_members;
+	uint32_t timer_index = UINT32_MAX;
+	if (tv) {
+		php_io_op_timer(&ops[n_members], php_io_deadline_from_timeval(tv));
+		op_ptrs[n_members] = &ops[n_members];
+		timer_index = n_members;
+		n_members++;
+	}
+
+	int ret = 0;
+	if (n_members == 0) {
+		/* Nothing to wait for and no timeout: select() would block forever */
+		errno = EINVAL;
+		ret = -1;
+	} else {
+		php_io_op any;
+		php_io_op_result any_result;
+		php_io_op_any(&any, op_ptrs, n_members, results);
+		if (php_io_run(&any, &any_result) == FAILURE) {
+			errno = ECANCELED;
+			ret = -1;
+		} else {
+			for (uint32_t i = 0; i < any.u.any.n_results; i++) {
+				uint32_t index = results[i].index;
+				if (index == timer_index || (results[i].status != PHP_IO_DONE && results[i].status != PHP_IO_READY)) {
+					continue;
+				}
+				/* Counted per set, as select() counts bits */
+				php_socket_t fd = ops[index].fd;
+				uint32_t revents = (uint32_t) results[i].res;
+				if ((revents & (PHP_POLL_READ | PHP_POLL_HUP | PHP_POLL_ERROR)) && (ops[index].u.poll.events & PHP_POLL_READ)) {
+					PHP_SAFE_FD_SET(fd, rfds);
+					ret++;
+				}
+				if ((revents & (PHP_POLL_WRITE | PHP_POLL_ERROR)) && (ops[index].u.poll.events & PHP_POLL_WRITE)) {
+					PHP_SAFE_FD_SET(fd, wfds);
+					ret++;
+				}
+				if ((revents & PHP_POLL_PRI) && (ops[index].u.poll.events & PHP_POLL_PRI)) {
+					PHP_SAFE_FD_SET(fd, efds);
+					ret++;
+				}
+			}
+		}
+	}
+
+	for (uint32_t i = 0; i < n_polls; i++) {
+		OBJ_RELEASE(handles[i]);
+	}
+	efree(handles);
+	efree(results);
+	efree(op_ptrs);
+	efree(ops);
+	if (members) {
+		efree(members);
+	}
+	return ret;
+}
+
 static int stream_array_from_fd_set(zval *stream_array, const fd_set *fds)
 {
 	zval *elem, *dest_elem;
@@ -883,7 +1027,15 @@ PHP_FUNCTION(stream_select)
 		}
 	}
 
-	retval = php_select(max_fd+1, &rfds, &wfds, &efds, tv_p);
+	if (php_io_hooks_active()) {
+		/* The provider waits: the sets are rebuilt from what it reported */
+		FD_ZERO(&rfds);
+		FD_ZERO(&wfds);
+		FD_ZERO(&efds);
+		retval = stream_select_any(r_array, w_array, e_array, tv_p, &rfds, &wfds, &efds);
+	} else {
+		retval = php_select(max_fd+1, &rfds, &wfds, &efds, tv_p);
+	}
 	php_stream_error_operation_end(context);
 
 	if (retval == -1) {
