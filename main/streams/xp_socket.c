@@ -79,8 +79,7 @@ static ssize_t php_sockop_write(php_stream *stream, const char *buf, size_t coun
 		ptimeout = &sock->timeout;
 
 	if (sock->is_blocked) {
-		php_deadline deadline;
-		php_deadline_init(&deadline, ptimeout);
+		php_deadline deadline = php_io_deadline_from_timeval(ptimeout);
 		sock->timeout_event = false;
 		didwrite = php_io_send(stream, sock->socket, buf, XP_SOCK_BUF_SIZE(count), 0, &deadline);
 	} else {
@@ -135,7 +134,7 @@ static ssize_t php_sockop_read(php_stream *stream, char *buf, size_t count)
 		if (has_buffered_data) {
 			php_deadline_init_nonblock(&deadline);
 		} else {
-			php_deadline_init(&deadline, sock->timeout.tv_sec == -1 ? NULL : &sock->timeout);
+			deadline = php_io_deadline_from_timeval(&sock->timeout);
 		}
 
 		nr_bytes = php_io_recv(stream, sock->socket, buf, XP_SOCK_BUF_SIZE(count), 0, &deadline);

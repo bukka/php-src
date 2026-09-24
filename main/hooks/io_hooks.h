@@ -180,11 +180,23 @@ PHPAPI void php_io_stream_orphan(php_stream *stream, php_io_queue *queue);
 PHPAPI void php_io_stream_unfreeze(php_stream *stream);
 PHPAPI void php_io_stream_drain(php_stream *stream);
 
-/* Poll with a relative timeout; NULL or tv_sec == -1 means no timeout. */
-static inline int php_io_poll_tv(php_stream *stream, php_socket_t fd, uint32_t events, const struct timeval *tv)
+/* Deadline helpers; NULL or a negative tv_sec means no timeout, like poll(2) */
+
+static inline php_deadline php_io_deadline_from_timeval(const struct timeval *tv)
 {
 	php_deadline dl;
-	php_deadline_init(&dl, (struct timeval *) tv);
+	if (tv == NULL || tv->tv_sec < 0) {
+		php_deadline_init_infinite(&dl);
+	} else {
+		php_deadline_init(&dl, (struct timeval *) tv);
+	}
+	return dl;
+}
+
+/* Poll with a relative timeout */
+static inline int php_io_poll_tv(php_stream *stream, php_socket_t fd, uint32_t events, const struct timeval *tv)
+{
+	php_deadline dl = php_io_deadline_from_timeval(tv);
 	return php_io_poll(stream, fd, events, &dl);
 }
 
@@ -216,15 +228,6 @@ struct _php_io_queue {
 };
 
 PHPAPI php_io_queue *php_io_queue_create_poll(php_poll_backend_type backend);
-
-/* Deadline helpers */
-
-static inline php_deadline php_io_deadline_from_timeval(const struct timeval *tv)
-{
-	php_deadline dl;
-	php_deadline_init(&dl, (struct timeval *) tv);
-	return dl;
-}
 
 static inline php_deadline php_io_deadline_from_ms(zend_long ms)
 {

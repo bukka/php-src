@@ -368,7 +368,7 @@ PHPAPI int php_network_connect_socket(php_stream *stream,
 	/* A Connect op: the connect and the wait for its outcome, on the
 	 * provider when one is installed */
 	php_deadline deadline;
-	php_deadline_init(&deadline, timeout);
+	deadline = php_io_deadline_from_timeval(timeout);
 	if (php_io_connect(stream, sockfd, addr, addrlen, &deadline) != 0) {
 		error = php_socket_errno();
 		if (error == ETIMEDOUT) {
@@ -804,7 +804,7 @@ PHPAPI php_socket_t php_network_accept_incoming_ex(php_stream *stream,
 	socklen_t sl;
 
 	php_deadline deadline;
-	php_deadline_init(&deadline, timeout);
+	deadline = php_io_deadline_from_timeval(timeout);
 	sl = sizeof(sa);
 	clisock = php_io_accept(stream, srvsock, (struct sockaddr*)&sa, &sl, &deadline);
 
