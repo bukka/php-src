@@ -21,8 +21,9 @@
 #include "php_network.h"
 
 #include <time.h>
+#include <errno.h>
+#include <signal.h>
 #ifndef PHP_WIN32
-# include <signal.h>
 # include <sys/types.h>
 #endif
 
@@ -137,6 +138,55 @@ PHPAPI zend_result php_poll_timer_modify(php_poll_ctx *ctx, php_poll_timer *time
 PHPAPI void php_poll_timer_remove(php_poll_ctx *ctx, php_poll_timer *timer);
 /* Armed timers */
 PHPAPI uint32_t php_poll_timer_count(php_poll_ctx *ctx);
+
+/* Signal sets and signal information for process and signal handles and
+ * the op layer: sigset_t and siginfo_t on POSIX, small structs on Windows,
+ * where a set is a bit per CRT signal number (the same shape as ior's
+ * ior_sigset_t and ior_siginfo_t) */
+#ifdef PHP_WIN32
+typedef struct { uint32_t bits; } php_sigset_t;
+typedef struct { int si_signo; int si_code; } php_siginfo_t;
+# define PHP_NSIG NSIG
+static zend_always_inline int php_sigemptyset(php_sigset_t *set)
+{
+	set->bits = 0;
+	return 0;
+}
+static zend_always_inline int php_sigaddset(php_sigset_t *set, int signo)
+{
+	if (signo < 1 || signo >= 32) {
+		errno = EINVAL;
+		return -1;
+	}
+	set->bits |= 1u << signo;
+	return 0;
+}
+static zend_always_inline int php_sigdelset(php_sigset_t *set, int signo)
+{
+	if (signo < 1 || signo >= 32) {
+		errno = EINVAL;
+		return -1;
+	}
+	set->bits &= ~(1u << signo);
+	return 0;
+}
+static zend_always_inline int php_sigismember(const php_sigset_t *set, int signo)
+{
+	if (signo < 1 || signo >= 32) {
+		errno = EINVAL;
+		return -1;
+	}
+	return (set->bits >> signo) & 1;
+}
+#else
+typedef sigset_t php_sigset_t;
+typedef siginfo_t php_siginfo_t;
+# define PHP_NSIG NSIG
+# define php_sigemptyset sigemptyset
+# define php_sigaddset sigaddset
+# define php_sigdelset sigdelset
+# define php_sigismember sigismember
+#endif
 
 #ifndef PHP_WIN32
 /* Native sources for process and signal handles: a descriptor readable when

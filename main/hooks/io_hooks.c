@@ -16,8 +16,10 @@
 #include "ext/standard/io_poll.h"
 
 #include <errno.h>
-#include <netdb.h>
-#include <arpa/inet.h>
+#ifndef PHP_WIN32
+# include <netdb.h>
+# include <arpa/inet.h>
+#endif
 #include <time.h>
 #ifndef PHP_WIN32
 # include <sys/wait.h>
@@ -26,6 +28,16 @@
 #endif
 
 PHPAPI void (*php_io_op_zobj_detach)(zend_object *zobj) = NULL;
+
+/* The callers of the socket entry points read php_socket_errno(), which on
+ * Windows is the Winsock error rather than errno */
+static zend_always_inline void php_io_set_errno(int err)
+{
+#ifdef PHP_WIN32
+	WSASetLastError(err);
+#endif
+	errno = err;
+}
 
 /* A stream whose in-flight op outlived its frame, kept by a queue */
 typedef struct {
@@ -699,22 +711,22 @@ static int php_io_poll_result_to_revents(const php_io_op_result *result, uint32_
 		case PHP_IO_DONE:
 		case PHP_IO_READY:
 			if (result->error) {
-				errno = result->error;
+				php_io_set_errno(result->error);
 				return -1;
 			}
 			return result->res ? (int) result->res : (int) events;
 		case PHP_IO_TIMEOUT:
-			errno = ETIMEDOUT;
+			php_io_set_errno(ETIMEDOUT);
 			return 0;
 		case PHP_IO_INTERRUPTED:
-			errno = EINTR;
+			php_io_set_errno(EINTR);
 			return -1;
 		case PHP_IO_CANCELLED:
-			errno = ECANCELED;
+			php_io_set_errno(ECANCELED);
 			return -1;
 		case PHP_IO_UNSUPPORTED:
 		default:
-			errno = ENOTSUP;
+			php_io_set_errno(ENOTSUP);
 			return -1;
 	}
 }
@@ -770,7 +782,7 @@ PHPAPI int php_io_poll(php_stream *stream, php_socket_t fd, uint32_t events, php
 	php_io_frame_end(&f, &op);
 
 	if (rc == FAILURE) {
-		errno = ECANCELED;
+		php_io_set_errno(ECANCELED);
 		return -1;
 	}
 	return php_io_poll_result_to_revents(&result, events);
@@ -782,22 +794,22 @@ static bool php_io_data_result(const php_io_op_result *result, ssize_t *ret)
 	switch (result->status) {
 		case PHP_IO_DONE:
 			if (result->error) {
-				errno = result->error;
+				php_io_set_errno(result->error);
 				*ret = -1;
 			} else {
 				*ret = (ssize_t) result->res;
 			}
 			return true;
 		case PHP_IO_TIMEOUT:
-			errno = ETIMEDOUT;
+			php_io_set_errno(ETIMEDOUT);
 			*ret = -1;
 			return true;
 		case PHP_IO_INTERRUPTED:
-			errno = EINTR;
+			php_io_set_errno(EINTR);
 			*ret = -1;
 			return true;
 		case PHP_IO_CANCELLED:
-			errno = ECANCELED;
+			php_io_set_errno(ECANCELED);
 			*ret = -1;
 			return true;
 		case PHP_IO_READY:
@@ -823,7 +835,7 @@ static bool php_io_data_result(const php_io_op_result *result, ssize_t *ret)
 		for (;;) { \
 			if (!direct) { \
 				ret = (SYSCALL); \
-				if (ret >= 0 || !PHP_IS_TRANSIENT_ERROR(errno)) { \
+				if (ret >= 0 || !PHP_IS_TRANSIENT_ERROR(php_socket_errno())) { \
 					break; \
 				} \
 				if (waited && (dl)->hrtime == 0) { \
@@ -834,7 +846,7 @@ static bool php_io_data_result(const php_io_op_result *result, ssize_t *ret)
 			PREP; \
 			op.stream = (stream); \
 			if (php_io_run(&op, &result) == FAILURE) { \
-				errno = ECANCELED; \
+				php_io_set_errno(ECANCELED); \
 				ret = -1; \
 				break; \
 			} \
@@ -843,7 +855,7 @@ static bool php_io_data_result(const php_io_op_result *result, ssize_t *ret)
 			} \
 			waited = true; \
 			if (result.status == PHP_IO_UNSUPPORTED && !direct) { \
-				errno = ENOTSUP; \
+				php_io_set_errno(ENOTSUP); \
 				ret = -1; \
 				break; \
 			} \
@@ -921,6 +933,10 @@ PHPAPI php_socket_t php_io_accept(php_stream *stream, php_socket_t fd, struct so
 			php_io_op_accept(&op, f.handle, fd, addr, addrlen, *dl));
 }
 
+/* A non-blocking connect that is under way: EINPROGRESS, EAGAIN on some
+ * systems, WSAEWOULDBLOCK on Windows (where EINPROGRESS is defined as it) */
+#define PHP_IO_CONNECT_PENDING(err) ((err) == EINPROGRESS || (err) == EAGAIN || (err) == EWOULDBLOCK)
+
 /* The connect is started once; the wait completes as Ready and the result
  * is read from SO_ERROR, or as Done when the provider connected itself */
 PHPAPI int php_io_connect(php_stream *stream, php_socket_t fd, const struct sockaddr *addr, socklen_t addrlen, php_deadline *dl)
@@ -939,7 +955,7 @@ PHPAPI int php_io_connect(php_stream *stream, php_socket_t fd, const struct sock
 		if (connect(fd, addr, addrlen) == 0) {
 			goto out;
 		}
-		if (errno != EINPROGRESS && errno != EAGAIN && errno != EWOULDBLOCK) {
+		if (!PHP_IO_CONNECT_PENDING(php_socket_errno())) {
 			ret = -1;
 			goto out;
 		}
@@ -950,7 +966,7 @@ PHPAPI int php_io_connect(php_stream *stream, php_socket_t fd, const struct sock
 		php_io_op_connect(&op, f.handle, fd, addr, addrlen, *dl);
 		op.stream = stream;
 		if (php_io_run(&op, &result) == FAILURE) {
-			errno = ECANCELED;
+			php_io_set_errno(ECANCELED);
 			ret = -1;
 			break;
 		}
@@ -964,7 +980,7 @@ PHPAPI int php_io_connect(php_stream *stream, php_socket_t fd, const struct sock
 			if (getsockopt(fd, SOL_SOCKET, SO_ERROR, (char *) &error, &len) != 0) {
 				ret = -1;
 			} else if (error) {
-				errno = error;
+				php_io_set_errno(error);
 				ret = -1;
 			}
 			break;
@@ -975,7 +991,7 @@ PHPAPI int php_io_connect(php_stream *stream, php_socket_t fd, const struct sock
 			if (connect(fd, addr, addrlen) == 0) {
 				break;
 			}
-			if (errno != EINPROGRESS && errno != EAGAIN && errno != EWOULDBLOCK) {
+			if (!PHP_IO_CONNECT_PENDING(php_socket_errno())) {
 				ret = -1;
 				break;
 			}
@@ -987,7 +1003,7 @@ PHPAPI int php_io_connect(php_stream *stream, php_socket_t fd, const struct sock
 			ret = r < 0 ? -1 : 0;
 			break;
 		}
-		errno = ENOTSUP;
+		php_io_set_errno(ENOTSUP);
 		ret = -1;
 		break;
 	}
@@ -1020,7 +1036,7 @@ static ssize_t php_io_file_op(php_stream *stream, int fd, php_deadline *dl, bool
 			prep(&op, f.handle, fd, buf, len, -1, *dl);
 			op.stream = stream;
 			if (php_io_run(&op, &result) == FAILURE) {
-				errno = ECANCELED;
+				php_io_set_errno(ECANCELED);
 				ret = -1;
 				break;
 			}
@@ -1038,7 +1054,7 @@ static ssize_t php_io_file_op(php_stream *stream, int fd, php_deadline *dl, bool
 			php_io_op_poll(&op, f.handle, fd, events, *dl);
 			op.stream = stream;
 			if (php_io_run(&op, &result) == FAILURE) {
-				errno = ECANCELED;
+				php_io_set_errno(ECANCELED);
 				ret = -1;
 				break;
 			}
@@ -1048,7 +1064,7 @@ static ssize_t php_io_file_op(php_stream *stream, int fd, php_deadline *dl, bool
 				break;
 			}
 			if (n == 0) {
-				errno = ETIMEDOUT;
+				php_io_set_errno(ETIMEDOUT);
 				ret = -1;
 				break;
 			}
@@ -1100,7 +1116,7 @@ PHPAPI int php_io_fsync(php_stream *stream, int fd, bool data_only)
 		zend_result rc = php_io_run(&op, &result);
 		php_io_frame_end(&f, &op);
 		if (rc == FAILURE) {
-			errno = ECANCELED;
+			php_io_set_errno(ECANCELED);
 			return -1;
 		}
 		if (php_io_data_result(&result, &ret)) {
@@ -1221,7 +1237,7 @@ PHPAPI pid_t php_io_waitpid(zend_object *handle, pid_t pid, int *status, int opt
 				op.fd = pidfd;
 			}
 			if (php_io_run(&op, &result) == FAILURE) {
-				errno = ECANCELED;
+				php_io_set_errno(ECANCELED);
 				ret = -1;
 				break;
 			}
@@ -1279,7 +1295,7 @@ PHPAPI int php_io_sigwait(zend_object *handle, const php_sigset_t *set, php_sigi
 				op.fd = sfd;
 			}
 			if (php_io_run(&op, &result) == FAILURE) {
-				errno = ECANCELED;
+				php_io_set_errno(ECANCELED);
 				ret = -1;
 				break;
 			}
@@ -1308,7 +1324,7 @@ PHPAPI int php_io_sigwait(zend_object *handle, const php_sigset_t *set, php_sigi
 					ret = op.u.sigwait.taken;
 					break;
 				}
-				errno = EAGAIN;
+				php_io_set_errno(EAGAIN);
 				ret = -1;
 				break;
 			}
@@ -1341,7 +1357,7 @@ PHPAPI int php_io_sigwait(zend_object *handle, const php_sigset_t *set, php_sigi
 		int signo;
 		int err = sigwait(set, &signo);
 		if (err != 0) {
-			errno = err;
+			php_io_set_errno(err);
 			return -1;
 		}
 		if (info) {
@@ -1351,7 +1367,7 @@ PHPAPI int php_io_sigwait(zend_object *handle, const php_sigset_t *set, php_sigi
 		return signo;
 	}
 	/* A timed wait without a source has nothing to wait on here */
-	errno = ENOSYS;
+	php_io_set_errno(ENOSYS);
 	return -1;
 #endif
 }

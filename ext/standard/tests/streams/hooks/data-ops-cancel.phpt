@@ -4,7 +4,7 @@ IO hooks: a provider that throws from run() cancels the operation, and a fiber d
 <?php
 include __DIR__ . '/scheduler.inc';
 
-[$r, $w] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
+[$r, $w] = stream_socket_pair(PHP_OS_FAMILY === 'Windows' ? STREAM_PF_INET : STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
 
 // 1. Throwing from run() surfaces from the blocking function
 Io\Hooks\set_hooks(new class implements Io\Hooks\Hooks {

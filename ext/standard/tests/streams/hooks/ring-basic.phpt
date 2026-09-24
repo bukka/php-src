@@ -11,8 +11,10 @@ $ring = new Io\Ring\Engine();
 var_dump($ring instanceof Io\OperationQueue);
 var_dump($ring->getBackend() instanceof Io\Ring\Backend);
 $caps = $ring->getHookCapabilities();
-var_dump(in_array(Io\Hooks\Capability::Files, $caps, true));
-var_dump($ring->getBackend() === Io\Ring\Backend::IoUring ? in_array(Io\Hooks\Capability::Direct, $caps, true) : !in_array(Io\Hooks\Capability::Direct, $caps, true));
+// Files everywhere but on IOCP, which needs overlapped handles the plain wrapper does not open yet
+var_dump(PHP_OS_FAMILY === 'Windows' ? !in_array(Io\Hooks\Capability::Files, $caps, true) : in_array(Io\Hooks\Capability::Files, $caps, true));
+// Direct where the backend completes ops itself: io_uring and IOCP, not the thread pool
+var_dump($ring->getBackend() !== Io\Ring\Backend::Threads ? in_array(Io\Hooks\Capability::Direct, $caps, true) : !in_array(Io\Hooks\Capability::Direct, $caps, true));
 var_dump($ring->countPending());
 
 $handle = $ring->getHandle();

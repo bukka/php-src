@@ -50,8 +50,11 @@ $scheduler->spawn(function () {
         fwrite($fd, "GET / HTTP/1.0\r\n");
         fwrite($fd, "Host: localhost\r\n");
         fwrite($fd, "\r\n");
-        while (!feof($fd)) {
-            echo trim("< " . fgets($fd)) . "\n";
+        /* Not feof(): on Windows the server's close lingers as a Poll op, so
+         * the client may read the last line before the close and see EOF only
+         * from the next read */
+        while (($line = fgets($fd)) !== false) {
+            echo trim("< " . $line) . "\n";
         }
     });
 });

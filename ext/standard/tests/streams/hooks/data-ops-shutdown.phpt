@@ -6,7 +6,7 @@ include __DIR__ . '/scheduler.inc';
 
 $scheduler = new Scheduler();
 Io\Hooks\set_hooks($scheduler);
-[$r, $w] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
+[$r, $w] = stream_socket_pair(PHP_OS_FAMILY === 'Windows' ? STREAM_PF_INET : STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
 
 $fiber = new Fiber(function () use ($r) {
     $data = fread($r, 10);

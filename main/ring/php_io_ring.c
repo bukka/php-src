@@ -17,8 +17,14 @@
 
 #include <ior/ior.h>
 #include <errno.h>
-#include <netdb.h>
-#include <unistd.h>
+#ifndef PHP_WIN32
+# include <netdb.h>
+# include <unistd.h>
+#endif
+
+/* The op layer's signal types are handed to ior as they are */
+ZEND_STATIC_ASSERT(sizeof(php_sigset_t) == sizeof(ior_sigset_t), "php_sigset_t must match ior_sigset_t");
+ZEND_STATIC_ASSERT(sizeof(php_siginfo_t) == sizeof(ior_siginfo_t), "php_siginfo_t must match ior_siginfo_t");
 
 /* One submitted op. The main submission and its linked timeout each
  * produce a cqe, and the record lives until both were reaped, however the
@@ -153,7 +159,14 @@ PHPAPI const char *php_io_ring_backend_name(php_io_ring *ring)
 
 PHPAPI uint32_t php_io_ring_hook_flags(php_io_ring *ring)
 {
+#ifdef PHP_WIN32
+	/* IOCP completes file ops only on handles opened overlapped, which the
+	 * plain wrapper does not do yet (design section 7.3): regular files
+	 * stay synchronous in the core and never reach the ring */
+	uint32_t flags = 0;
+#else
 	uint32_t flags = PHP_IO_HOOKS_F_FILES;
+#endif
 	if (ring->features & IOR_FEAT_NATIVE_ASYNC) {
 		flags |= PHP_IO_HOOKS_F_DIRECT;
 	}
@@ -419,7 +432,7 @@ static zend_result php_io_ring_submit_one(php_io_ring *ring, php_io_ring_req *re
 			op->in_flight = true;
 			break;
 		case PHP_IO_OP_SIGWAIT: {
-			int rc = ior_prep_sigwait(ctx, sqe, op->u.sigwait.set, op->u.sigwait.info);
+			int rc = ior_prep_sigwait(ctx, sqe, (const ior_sigset_t *) op->u.sigwait.set, (ior_siginfo_t *) op->u.sigwait.info);
 			if (rc < 0) {
 				php_io_ring_sqe_void(ctx, sqe);
 				errno = -rc;

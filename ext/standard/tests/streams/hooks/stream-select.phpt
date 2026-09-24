@@ -22,8 +22,8 @@ final class Tracing extends Scheduler
 $scheduler = new Tracing();
 Io\Hooks\set_hooks($scheduler);
 
-[$a, $b] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
-[$c, $d] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
+[$a, $b] = stream_socket_pair(PHP_OS_FAMILY === 'Windows' ? STREAM_PF_INET : STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
+[$c, $d] = stream_socket_pair(PHP_OS_FAMILY === 'Windows' ? STREAM_PF_INET : STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
 
 $scheduler->spawn(function () use ($a, $c) {
     // Nothing readable yet: the select times out

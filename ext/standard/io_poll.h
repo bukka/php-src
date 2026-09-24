@@ -39,11 +39,11 @@ PHPAPI void php_io_poll_timer_handle_create(zval *dest, zend_hrtime_t timeout_ns
 
 /* Io\Poll\ProcessHandle for a child pid, Io\Poll\SignalHandle for a set */
 PHPAPI void php_io_poll_process_handle_create(zval *dest, pid_t pid);
-PHPAPI void php_io_poll_signal_handle_create(zval *dest, const sigset_t *set);
+PHPAPI void php_io_poll_signal_handle_create(zval *dest, const php_sigset_t *set);
 /* The wait status a ProcessHandle recorded when it reaped the child */
 PHPAPI bool php_io_poll_process_handle_status(zend_object *handle, int *status);
 /* Take the first recorded delivery of a signal in the set; 0 when none */
-PHPAPI int php_io_poll_signal_handle_take(zend_object *handle, const sigset_t *set, siginfo_t *info);
+PHPAPI int php_io_poll_signal_handle_take(zend_object *handle, const php_sigset_t *set, php_siginfo_t *info);
 
 /* Raise an Io\Poll\NotifyHandle. Thread safe and async-signal safe. */
 PHPAPI void php_poll_notify(zend_object *handle);

@@ -27,8 +27,10 @@
 #include "io_hooks_decl.h"
 
 #include <errno.h>
-#include <netdb.h>
-#include <arpa/inet.h>
+#ifndef PHP_WIN32
+# include <netdb.h>
+# include <arpa/inet.h>
+#endif
 
 static zend_class_entry *php_io_completion_status_ce;
 static zend_class_entry *php_io_operation_ce;
@@ -174,7 +176,6 @@ static void php_io_operation_detach(zend_object *zobj)
 		php_io_opqueue_sub_unlink(sub->owner, sub);
 		php_io_opqueue_sub_free(sub);
 	}
-#ifndef PHP_WIN32
 	/* What a signal handle consumed for this wait goes back with the op */
 	if (op && op->type == PHP_IO_OP_SIGWAIT && op->u.sigwait.taken == 0) {
 		zend_object *handle = intern->lazy_handle ? intern->lazy_handle : op->handle;
@@ -182,7 +183,6 @@ static void php_io_operation_detach(zend_object *zobj)
 			op->u.sigwait.taken = php_io_poll_signal_handle_take(handle, op->u.sigwait.set, op->u.sigwait.info);
 		}
 	}
-#endif
 }
 
 static php_io_op *php_io_operation_fetch(zval *zv)
@@ -289,7 +289,6 @@ PHP_METHOD(Io_Operation, getHandle)
 				php_io_poll_timer_handle_create(&handle_zv, remaining, false);
 				break;
 			}
-#ifndef PHP_WIN32
 			case PHP_IO_OP_WAITPID:
 				if (op->u.waitpid.pid <= 0) {
 					RETURN_NULL();
@@ -299,7 +298,6 @@ PHP_METHOD(Io_Operation, getHandle)
 			case PHP_IO_OP_SIGWAIT:
 				php_io_poll_signal_handle_create(&handle_zv, op->u.sigwait.set);
 				break;
-#endif
 			default:
 				RETURN_NULL();
 		}
@@ -443,13 +441,11 @@ PHP_METHOD(Io_Operation_SigWait, getSignals)
 		RETURN_THROWS();
 	}
 	array_init(return_value);
-#ifndef PHP_WIN32
-	for (int signo = 1; signo < NSIG; signo++) {
-		if (sigismember(op->u.sigwait.set, signo) == 1) {
+	for (int signo = 1; signo < PHP_NSIG; signo++) {
+		if (php_sigismember(op->u.sigwait.set, signo) == 1) {
 			add_next_index_long(return_value, signo);
 		}
 	}
-#endif
 }
 
 PHP_METHOD(Io_Operation_Connect, getAddress)

@@ -4,7 +4,7 @@ IO hooks: pcntl_fork() refuses while an operation is in flight
 pcntl
 --FILE--
 <?php
-[$r, $w] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
+[$r, $w] = stream_socket_pair(PHP_OS_FAMILY === 'Windows' ? STREAM_PF_INET : STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
 
 Io\Hooks\set_hooks(new class implements Io\Hooks\Hooks {
     public function getCapabilities(): array { return []; }

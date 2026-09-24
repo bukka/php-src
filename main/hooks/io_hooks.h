@@ -61,12 +61,12 @@ typedef struct _php_io_op_result {
 typedef struct _php_io_op php_io_op;
 typedef struct _php_io_queue php_io_queue;
 
-#ifdef PHP_WIN32
-typedef struct { uint32_t bits; } php_sigset_t;
-typedef struct { int si_signo; int si_code; } php_siginfo_t;
-#else
-typedef sigset_t php_sigset_t;
-typedef siginfo_t php_siginfo_t;
+/* getaddrinfo() codes Windows lacks */
+#ifndef EAI_SYSTEM
+# define EAI_SYSTEM EAI_FAIL
+#endif
+#ifndef EAI_OVERFLOW
+# define EAI_OVERFLOW EAI_FAIL
 #endif
 
 struct _php_io_op {
