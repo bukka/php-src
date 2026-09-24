@@ -290,7 +290,7 @@ PHP_FUNCTION(gethostbynamel)
 			add_next_index_string(return_value, ipaddr);
 		}
 	}
-	freeaddrinfo(res);
+	php_io_freeaddrinfo(res);
 	(void) hp;
 	(void) i;
 }
@@ -316,11 +316,11 @@ static zend_string *php_gethostbyname(char *name)
 	for (ai = res; ai && ai->ai_family != AF_INET; ai = ai->ai_next) {
 	}
 	if (!ai) {
-		freeaddrinfo(res);
+		php_io_freeaddrinfo(res);
 		return zend_string_init(name, strlen(name), 0);
 	}
 	in = ((struct sockaddr_in *) ai->ai_addr)->sin_addr;
-	freeaddrinfo(res);
+	php_io_freeaddrinfo(res);
 
 	if (!(address = inet_ntop(AF_INET, &in, addr4, INET_ADDRSTRLEN))) {
 		return NULL;

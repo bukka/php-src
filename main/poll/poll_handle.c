@@ -84,6 +84,9 @@ PHPAPI void php_poll_handle_object_free(zend_object *obj)
 	if (intern->watching) {
 		zend_hash_destroy(intern->watching);
 		efree(intern->watching);
+		/* The cycle collector frees the objects of a cycle in any order, and
+		 * a context freed later still unwatches through its watchers */
+		intern->watching = NULL;
 	}
 
 	/* Persistent ops hold a reference on the handle, so none can be left */

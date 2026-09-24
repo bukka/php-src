@@ -225,26 +225,36 @@ static int php_sockop_stat(php_stream *stream, php_stream_statbuf *ssb)
 #endif
 }
 
-static inline int sock_sendto(php_netstream_data_t *sock, const char *buf, size_t buflen, int flags,
-		struct sockaddr *addr, socklen_t addrlen
+/* The descriptor is non-blocking: on a blocking stream (dl set) a call that
+ * would block waits for readiness as a Poll op, up to the stream's timeout */
+static inline int sock_sendto(php_stream *stream, php_netstream_data_t *sock, const char *buf, size_t buflen, int flags,
+		struct sockaddr *addr, socklen_t addrlen, php_deadline *dl
 		)
 {
 	int ret;
 	if (addr) {
-		ret = sendto(sock->socket, buf, XP_SOCK_BUF_SIZE(buflen), flags, addr, XP_SOCK_BUF_SIZE(addrlen));
+		ret = (int) php_io_sendto(stream, sock->socket, buf, XP_SOCK_BUF_SIZE(buflen), flags, addr, XP_SOCK_BUF_SIZE(addrlen), dl);
 
 		return (ret == SOCK_CONN_ERR) ? -1 : ret;
 	}
-#ifdef PHP_WIN32
-	return ((ret = send(sock->socket, buf, buflen > INT_MAX ? INT_MAX : (int)buflen, flags)) == SOCK_CONN_ERR) ? -1 : ret;
-#else
-	return ((ret = send(sock->socket, buf, buflen, flags)) == SOCK_CONN_ERR) ? -1 : ret;
-#endif
+	ret = (int) php_io_sendto(stream, sock->socket, buf, buflen > INT_MAX ? INT_MAX : buflen, flags, NULL, 0, dl);
+	return (ret == SOCK_CONN_ERR) ? -1 : ret;
 }
 
-static inline int sock_recvfrom(php_netstream_data_t *sock, char *buf, size_t buflen, int flags,
+/* The stream's timeout as the deadline of a blocking stream's transport
+ * call; NULL for a non-blocking stream, which never waits */
+static inline php_deadline *sock_xport_deadline(php_netstream_data_t *sock, php_deadline *dl)
+{
+	if (!sock->is_blocked) {
+		return NULL;
+	}
+	*dl = php_io_deadline_from_timeval(&sock->timeout);
+	return dl;
+}
+
+static inline int sock_recvfrom(php_stream *stream, php_netstream_data_t *sock, char *buf, size_t buflen, int flags,
 		zend_string **textaddr,
-		struct sockaddr **addr, socklen_t *addrlen
+		struct sockaddr **addr, socklen_t *addrlen, php_deadline *dl
 		)
 {
 	int ret;
@@ -253,7 +263,7 @@ static inline int sock_recvfrom(php_netstream_data_t *sock, char *buf, size_t bu
 	if (want_addr) {
 		php_sockaddr_storage sa;
 		socklen_t sl = sizeof(sa);
-		ret = recvfrom(sock->socket, buf, XP_SOCK_BUF_SIZE(buflen), flags, (struct sockaddr*)&sa, &sl);
+		ret = (int) php_io_recvfrom(stream, sock->socket, buf, XP_SOCK_BUF_SIZE(buflen), flags, (struct sockaddr*)&sa, &sl, dl);
 		ret = (ret == SOCK_CONN_ERR) ? -1 : ret;
 #ifdef PHP_WIN32
 		/* POSIX discards excess bytes without signalling failure; emulate this on Windows */
@@ -274,7 +284,7 @@ static inline int sock_recvfrom(php_netstream_data_t *sock, char *buf, size_t bu
 			}
 		}
 	} else {
-		ret = recv(sock->socket, buf, XP_SOCK_BUF_SIZE(buflen), flags);
+		ret = (int) php_io_recvfrom(stream, sock->socket, buf, XP_SOCK_BUF_SIZE(buflen), flags, NULL, NULL, dl);
 		ret = (ret == SOCK_CONN_ERR) ? -1 : ret;
 	}
 
@@ -286,6 +296,7 @@ static int php_sockop_set_option(php_stream *stream, int option, int value, void
 	int oldmode, flags;
 	php_netstream_data_t *sock = (php_netstream_data_t*)stream->abstract;
 	php_stream_xport_param *xparam;
+	php_deadline xport_dl;
 
 	if (!sock) {
 		return PHP_STREAM_OPTION_RETURN_NOTIMPL;
@@ -387,11 +398,12 @@ static int php_sockop_set_option(php_stream *stream, int option, int value, void
 					if ((xparam->inputs.flags & STREAM_OOB) == STREAM_OOB) {
 						flags |= MSG_OOB;
 					}
-					xparam->outputs.returncode = sock_sendto(sock,
+					xparam->outputs.returncode = sock_sendto(stream, sock,
 							xparam->inputs.buf, xparam->inputs.buflen,
 							flags,
 							xparam->inputs.addr,
-							xparam->inputs.addrlen);
+							xparam->inputs.addrlen,
+							sock_xport_deadline(sock, &xport_dl));
 					if (xparam->outputs.returncode == -1) {
 						char *err = php_socket_strerror(php_socket_errno(), NULL, 0);
 						php_stream_warn(stream, NetworkSendFailed, "%s", err);
@@ -407,13 +419,13 @@ static int php_sockop_set_option(php_stream *stream, int option, int value, void
 					if ((xparam->inputs.flags & STREAM_PEEK) == STREAM_PEEK) {
 						flags |= MSG_PEEK;
 					}
-					xparam->outputs.returncode = sock_recvfrom(sock,
+					xparam->outputs.returncode = sock_recvfrom(stream, sock,
 							xparam->inputs.buf, xparam->inputs.buflen,
 							flags,
 							xparam->want_textaddr ? &xparam->outputs.textaddr : NULL,
 							xparam->want_addr ? &xparam->outputs.addr : NULL,
-							xparam->want_addr ? &xparam->outputs.addrlen : NULL
-							);
+							xparam->want_addr ? &xparam->outputs.addrlen : NULL,
+							sock_xport_deadline(sock, &xport_dl));
 					return PHP_STREAM_OPTION_RETURN_OK;
 
 

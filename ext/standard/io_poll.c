@@ -33,13 +33,6 @@
 #endif
 #ifdef __linux__
 # include <sys/eventfd.h>
-# include <sys/syscall.h>
-#endif
-#ifdef HAVE_SYS_SIGNALFD_H
-# include <sys/signalfd.h>
-#endif
-#ifdef HAVE_SYS_PIDFD_H
-# include <sys/pidfd.h>
 #endif
 
 /* Class entries */
@@ -612,6 +605,7 @@ typedef struct {
 	bool owned;
 	void (*clear)(void *arg);   /* external: how to clear it */
 	void *clear_arg;
+	zend_object *owner;         /* external: whose descriptor it is */
 } php_io_poll_notify_handle_data;
 
 static php_socket_t php_io_poll_notify_handle_get_fd(php_poll_handle_object *handle)
@@ -637,6 +631,9 @@ static void php_io_poll_notify_handle_cleanup(php_poll_handle_object *handle)
 			if (data->read_fd >= 0) {
 				close(data->read_fd);
 			}
+		}
+		if (data->owner) {
+			OBJ_RELEASE(data->owner);
 		}
 		efree(data);
 		handle->handle_data = NULL;
@@ -701,8 +698,9 @@ PHPAPI void php_poll_notify(zend_object *handle_obj)
 }
 
 
-/* ProcessHandle: a pidfd where the platform has one. When it fires the
- * child is reaped and the status recorded, here and for the WaitPid op. */
+/* ProcessHandle: the platform's process source (php_poll_process_source_open)
+ * where there is one. When it fires the child is reaped and the status
+ * recorded, here and for the WaitPid op. */
 
 typedef struct {
 	pid_t pid;
@@ -770,30 +768,18 @@ static zend_object *php_io_poll_process_handle_create_object(zend_class_entry *c
 	return &intern->std;
 }
 
-static int php_io_poll_pidfd_open(pid_t pid)
-{
-#if defined(HAVE_PIDFD_OPEN)
-	return pidfd_open(pid, 0);
-#elif defined(__linux__) && defined(SYS_pidfd_open)
-	return (int) syscall(SYS_pidfd_open, pid, 0);
-#else
-	errno = ENOSYS;
-	return -1;
-#endif
-}
-
 static zend_result php_io_poll_process_handle_init(php_poll_handle_object *handle, pid_t pid, uint32_t arg_num)
 {
-	int fd = php_io_poll_pidfd_open(pid);
+	int fd = -1;
+#ifndef PHP_WIN32
+	fd = php_poll_process_source_open(pid);
 	if (fd < 0 && errno != ENOSYS) {
 		if (arg_num) {
 			zend_argument_value_error(arg_num, "must be the id of a running process: %s", strerror(errno));
 		}
 		return FAILURE;
 	}
-	if (fd >= 0) {
-		fcntl(fd, F_SETFD, FD_CLOEXEC);
-	}
+#endif
 	php_io_poll_process_handle_data *data = ecalloc(1, sizeof(*data));
 	data->pid = pid;
 	data->fd = fd;
@@ -863,7 +849,7 @@ PHP_METHOD(Io_Poll_ProcessHandle, fromProcess)
 	}
 	object_init_ex(return_value, php_io_poll_process_handle_class_entry);
 	if (php_io_poll_process_handle_init(PHP_POLL_HANDLE_OBJ_FROM_ZV(return_value), (pid_t) pid, 1) == FAILURE) {
-		zval_ptr_dtor(return_value);
+		/* The engine releases the result of a throwing call */
 		RETURN_THROWS();
 	}
 }
@@ -895,18 +881,36 @@ PHP_METHOD(Io_Poll_ProcessHandle, getStatus)
 	RETURN_LONG(data->status);
 }
 
-/* SignalHandle: a signalfd over the set where the platform has one. The
- * signals are blocked for the life of the handle; a read consumes one
- * delivery and records its info until an op or getDelivered() takes it. */
+/* SignalHandle: the platform's signal source (php_poll_signal_source_open)
+ * over the set where there is one. The signals are blocked for the life of
+ * the handle; when the source fires every pending delivery is taken and its
+ * info recorded until an op or getDelivered() takes it. */
 
 typedef struct {
 	sigset_t set;
-	sigset_t blocked_here;      /* what the handle blocked, to unblock at cleanup */
 	int fd;
 	siginfo_t *infos;
 	uint32_t n_infos;
 	uint32_t cap_infos;
 } php_io_poll_signal_handle_data;
+
+#ifndef PHP_WIN32
+/* Live handles per signal, and the signals the handles blocked themselves:
+ * a signal is unblocked again when the last handle for it goes, and never
+ * when the process had it blocked before any handle */
+ZEND_TLS uint32_t php_io_poll_signal_handle_count[NSIG];
+ZEND_TLS sigset_t php_io_poll_signals_blocked_by_handles;
+#endif
+
+PHPAPI void php_io_poll_signal_child_mask(sigset_t *mask)
+{
+	sigprocmask(SIG_BLOCK, NULL, mask);
+	for (int signo = 1; signo < NSIG; signo++) {
+		if (sigismember(&php_io_poll_signals_blocked_by_handles, signo) == 1) {
+			sigdelset(mask, signo);
+		}
+	}
+}
 
 static php_socket_t php_io_poll_signal_handle_get_fd(php_poll_handle_object *handle)
 {
@@ -927,7 +931,23 @@ static void php_io_poll_signal_handle_cleanup(php_poll_handle_object *handle)
 			close(data->fd);
 		}
 #ifndef PHP_WIN32
-		sigprocmask(SIG_UNBLOCK, &data->blocked_here, NULL);
+		sigset_t unblock;
+		bool any = false;
+		sigemptyset(&unblock);
+		for (int signo = 1; signo < NSIG; signo++) {
+			if (sigismember(&data->set, signo) != 1 || php_io_poll_signal_handle_count[signo] == 0) {
+				continue;
+			}
+			if (--php_io_poll_signal_handle_count[signo] == 0
+					&& sigismember(&php_io_poll_signals_blocked_by_handles, signo) == 1) {
+				sigdelset(&php_io_poll_signals_blocked_by_handles, signo);
+				sigaddset(&unblock, signo);
+				any = true;
+			}
+		}
+		if (any) {
+			sigprocmask(SIG_UNBLOCK, &unblock, NULL);
+		}
 #endif
 		if (data->infos) {
 			efree(data->infos);
@@ -952,17 +972,9 @@ static void php_io_poll_signal_handle_fired(php_poll_handle_object *handle)
 	if (!data || data->fd < 0) {
 		return;
 	}
-#ifdef HAVE_SYS_SIGNALFD_H
-	struct signalfd_siginfo fdsi;
-	while (read(data->fd, &fdsi, sizeof(fdsi)) == sizeof(fdsi)) {
-		siginfo_t info;
-		memset(&info, 0, sizeof(info));
-		info.si_signo = (int) fdsi.ssi_signo;
-		info.si_errno = (int) fdsi.ssi_errno;
-		info.si_code = (int) fdsi.ssi_code;
-		info.si_pid = (pid_t) fdsi.ssi_pid;
-		info.si_uid = (uid_t) fdsi.ssi_uid;
-		info.si_status = (int) fdsi.ssi_status;
+#ifndef PHP_WIN32
+	siginfo_t info;
+	while (php_poll_signal_source_take(data->fd, &data->set, &info) > 0) {
 		php_io_poll_signal_handle_record(data, &info);
 	}
 #endif
@@ -990,19 +1002,21 @@ static void php_io_poll_signal_handle_init(php_poll_handle_object *handle, const
 	data->set = *set;
 	data->fd = -1;
 #ifndef PHP_WIN32
-	/* Block what is not blocked yet, so the signals queue for the descriptor */
+	/* Block what is not blocked yet, so the signals queue for the source */
 	sigset_t old;
-	sigemptyset(&data->blocked_here);
 	if (sigprocmask(SIG_BLOCK, set, &old) == 0) {
 		for (int signo = 1; signo < NSIG; signo++) {
-			if (sigismember(set, signo) == 1 && sigismember(&old, signo) == 0) {
-				sigaddset(&data->blocked_here, signo);
+			if (sigismember(set, signo) != 1) {
+				continue;
+			}
+			if (php_io_poll_signal_handle_count[signo]++ == 0 && sigismember(&old, signo) == 0) {
+				sigaddset(&php_io_poll_signals_blocked_by_handles, signo);
 			}
 		}
 	}
-#endif
-#ifdef HAVE_SYS_SIGNALFD_H
-	data->fd = signalfd(-1, set, SFD_NONBLOCK | SFD_CLOEXEC);
+	/* No source (ENOSYS, or the platform could not open one): the handle is
+	 * still identity for a provider, and Context::add() refuses it */
+	data->fd = php_poll_signal_source_open(set);
 #endif
 	handle->handle_data = data;
 }
@@ -1130,7 +1144,7 @@ PHP_METHOD(Io_Poll_NotifyHandle, __construct)
 }
 
 PHPAPI void php_io_poll_notify_handle_create_external(zval *dest, php_socket_t fd,
-		void (*clear)(void *arg), void *arg)
+		void (*clear)(void *arg), void *arg, zend_object *owner)
 {
 	object_init_ex(dest, php_io_poll_notify_handle_class_entry);
 	php_poll_handle_object *intern = PHP_POLL_HANDLE_OBJ_FROM_ZV(dest);
@@ -1140,7 +1154,26 @@ PHPAPI void php_io_poll_notify_handle_create_external(zval *dest, php_socket_t f
 	data->owned = false;
 	data->clear = clear;
 	data->clear_arg = arg;
+	data->owner = owner;
+	if (owner) {
+		GC_ADDREF(owner);
+	}
 	intern->handle_data = data;
+}
+
+/* Handles hold no zvals; an external NotifyHandle holds its owner */
+static HashTable *php_io_poll_handle_get_gc(zend_object *obj, zval **table, int *n)
+{
+	php_poll_handle_object *intern = PHP_POLL_HANDLE_OBJ_FROM_ZOBJ(obj);
+	zend_get_gc_buffer *gc_buffer = zend_get_gc_buffer_create();
+	if (intern->ops == &php_io_poll_notify_handle_ops && intern->handle_data) {
+		php_io_poll_notify_handle_data *data = intern->handle_data;
+		if (data->owner) {
+			zend_get_gc_buffer_add_obj(gc_buffer, data->owner);
+		}
+	}
+	zend_get_gc_buffer_use(gc_buffer, table, n);
+	return NULL;
 }
 
 PHP_METHOD(Io_Poll_NotifyHandle, notify)
@@ -1359,6 +1392,8 @@ static void php_io_poll_watcher_free_object(zend_object *obj)
 
 	if (intern->handle) {
 		OBJ_RELEASE(&intern->handle->std);
+		/* A context freed later in the same collection must not follow it */
+		intern->handle = NULL;
 	}
 
 	zend_object_std_dtor(&intern->std);
@@ -2120,6 +2155,7 @@ PHP_MINIT_FUNCTION(poll)
 	memcpy(&php_io_poll_handle_object_handlers, &std_object_handlers, sizeof(zend_object_handlers));
 	php_io_poll_handle_object_handlers.offset = offsetof(php_poll_handle_object, std);
 	php_io_poll_handle_object_handlers.free_obj = php_poll_handle_object_free;
+	php_io_poll_handle_object_handlers.get_gc = php_io_poll_handle_get_gc;
 	php_io_poll_handle_object_handlers.clone_obj = NULL;
 	php_stream_poll_handle_class_entry->default_object_handlers = &php_io_poll_handle_object_handlers;
 

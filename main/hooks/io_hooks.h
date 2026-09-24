@@ -176,10 +176,23 @@ PHPAPI ssize_t php_io_read(php_stream *stream, int fd, void *buf, size_t len, ph
 PHPAPI ssize_t php_io_write(php_stream *stream, int fd, const void *buf, size_t len, php_deadline *dl);
 PHPAPI php_socket_t php_io_accept(php_stream *stream, php_socket_t fd, struct sockaddr *addr, socklen_t *addrlen, php_deadline *dl);
 PHPAPI int php_io_connect(php_stream *stream, php_socket_t fd, const struct sockaddr *addr, socklen_t addrlen, php_deadline *dl);
+/* Datagram sends and receives have no data op: the syscall first and a
+ * Poll op on EAGAIN, retried when the descriptor is ready, bounded by the
+ * deadline. A NULL deadline is the plain syscall, for a non-blocking
+ * stream. addr NULL means send() and recv(). */
+PHPAPI ssize_t php_io_sendto(php_stream *stream, php_socket_t fd, const void *buf, size_t len, int flags, const struct sockaddr *addr, socklen_t addrlen, php_deadline *dl);
+PHPAPI ssize_t php_io_recvfrom(php_stream *stream, php_socket_t fd, void *buf, size_t len, int flags, struct sockaddr *addr, socklen_t *addrlen, php_deadline *dl);
 PHPAPI int php_io_fsync(php_stream *stream, int fd, bool data_only);
 /* Both return the EAI_* code like the library call; the result list of
- * getaddrinfo is freed with freeaddrinfo() whoever built it */
+ * getaddrinfo is freed with php_io_freeaddrinfo(), since a list a provider
+ * built has a layout of its own and the C libraries disagree on theirs */
 PHPAPI int php_io_getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res, php_deadline *dl);
+PHPAPI void php_io_freeaddrinfo(struct addrinfo *res);
+/* A provider's list: every entry one malloc() block with the address behind
+ * the addrinfo. register hands the head to php_io_freeaddrinfo(), free_list
+ * frees an unregistered one */
+PHPAPI void php_io_addrinfo_register(struct addrinfo *head);
+PHPAPI void php_io_addrinfo_free_list(struct addrinfo *head);
 PHPAPI int php_io_getnameinfo(const struct sockaddr *addr, socklen_t addrlen, int flags, char *host, size_t hostlen, char *service, size_t servicelen, php_deadline *dl);
 PHPAPI zend_result php_io_sleep(php_deadline dl);
 /* Like waitpid(2) and sigtimedwait(2); a timed out signal wait fails with EAGAIN */

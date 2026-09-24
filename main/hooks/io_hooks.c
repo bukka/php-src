@@ -24,17 +24,15 @@
 # include <signal.h>
 # include <fcntl.h>
 #endif
-#ifdef __linux__
-# include <sys/syscall.h>
-#endif
-#ifdef HAVE_SYS_SIGNALFD_H
-# include <sys/signalfd.h>
-#endif
-#ifdef HAVE_SYS_PIDFD_H
-# include <sys/pidfd.h>
-#endif
 
 PHPAPI void (*php_io_op_zobj_detach)(zend_object *zobj) = NULL;
+
+/* A stream whose in-flight op outlived its frame, kept by a queue */
+typedef struct {
+	php_io_queue *queue;
+	php_stream *stream;
+	bool freeing;               /* php_stream_free() is draining it: the resource is closing under us */
+} php_io_orphan;
 
 /* Operation constructors */
 
@@ -325,6 +323,19 @@ PHPAPI void php_io_hooks_request_shutdown(void)
 		q->ops->destroy(q);
 	}
 	if (FG(io_orphans)) {
+		/* A queue that outlived the provider (an object held elsewhere)
+		 * still owns the buffers of its orphans: settle them before the
+		 * resource list closes the streams, which happens before the
+		 * object store frees the queue */
+		while (zend_hash_num_elements(FG(io_orphans)) > 0) {
+			zend_hash_internal_pointer_reset(FG(io_orphans));
+			php_io_orphan *o = zend_hash_get_current_data_ptr(FG(io_orphans));
+			php_stream *stream = o->stream;
+			if (o->queue->ops->drain) {
+				o->queue->ops->drain(o->queue, stream);
+			}
+			php_io_stream_unfreeze(stream);
+		}
 		zend_hash_destroy(FG(io_orphans));
 		efree(FG(io_orphans));
 		FG(io_orphans) = NULL;
@@ -334,6 +345,45 @@ PHPAPI void php_io_hooks_request_shutdown(void)
 		efree(FG(io_reaped));
 		FG(io_reaped) = NULL;
 	}
+	if (FG(io_addrinfo)) {
+		struct addrinfo *head;
+		ZEND_HASH_FOREACH_PTR(FG(io_addrinfo), head) {
+			php_io_addrinfo_free_list(head);
+		} ZEND_HASH_FOREACH_END();
+		zend_hash_destroy(FG(io_addrinfo));
+		efree(FG(io_addrinfo));
+		FG(io_addrinfo) = NULL;
+	}
+}
+
+PHPAPI void php_io_addrinfo_free_list(struct addrinfo *head)
+{
+	while (head) {
+		struct addrinfo *next = head->ai_next;
+		free(head);
+		head = next;
+	}
+}
+
+PHPAPI void php_io_addrinfo_register(struct addrinfo *head)
+{
+	if (!FG(io_addrinfo)) {
+		FG(io_addrinfo) = emalloc(sizeof(HashTable));
+		zend_hash_init(FG(io_addrinfo), 4, NULL, NULL, 0);
+	}
+	zend_hash_index_add_new_ptr(FG(io_addrinfo), (zend_ulong) (uintptr_t) head, head);
+}
+
+PHPAPI void php_io_freeaddrinfo(struct addrinfo *res)
+{
+	if (!res) {
+		return;
+	}
+	if (FG(io_addrinfo) && zend_hash_index_del(FG(io_addrinfo), (zend_ulong) (uintptr_t) res) == SUCCESS) {
+		php_io_addrinfo_free_list(res);
+		return;
+	}
+	freeaddrinfo(res);
 }
 
 PHPAPI void php_io_child_reaped(pid_t pid, int status)
@@ -387,10 +437,6 @@ static zend_always_inline zend_ulong php_io_stream_key(php_stream *stream)
 	return (key >> 3) | (key << ((sizeof(key) * 8) - 3));
 }
 
-typedef struct {
-	php_io_queue *queue;
-	bool freeing;               /* php_stream_free() is draining it: the resource is closing under us */
-} php_io_orphan;
 
 static void php_io_orphan_dtor(zval *zv)
 {
@@ -406,6 +452,7 @@ PHPAPI void php_io_stream_orphan(php_stream *stream, php_io_queue *queue)
 	if (!zend_hash_index_exists(FG(io_orphans), php_io_stream_key(stream))) {
 		php_io_orphan *o = emalloc(sizeof(*o));
 		o->queue = queue;
+		o->stream = stream;
 		o->freeing = false;
 		/* The buffer belongs to the backend until the completion arrives */
 		GC_ADDREF(stream->res);
@@ -808,6 +855,53 @@ PHPAPI ssize_t php_io_send(php_stream *stream, php_socket_t fd, const void *buf,
 			php_io_op_send(&op, f.handle, fd, buf, len, flags, *dl));
 }
 
+/* The readiness form of the ladder, for calls without a data op: the
+ * syscall first and a Poll op on EAGAIN, retried once the descriptor is
+ * ready. The op carries the caller's deadline, so the whole call is bounded
+ * by it, and a non-blocking deadline gets one readiness check. A NULL
+ * deadline is the plain syscall. */
+#define PHP_IO_READINESS_OP(stream, fd, events, dl, SYSCALL) \
+	do { \
+		ssize_t ret; \
+		bool waited = false; \
+		for (;;) { \
+			ret = (SYSCALL); \
+			if (ret >= 0 || !(dl) || !PHP_IS_TRANSIENT_ERROR(php_socket_errno())) { \
+				break; \
+			} \
+			if (waited && (dl)->hrtime == 0) { \
+				break; \
+			} \
+			if (php_io_poll((stream), (fd), (events), (dl)) <= 0) { \
+				/* errno: ETIMEDOUT, ECANCELED or the failure */ \
+				ret = -1; \
+				break; \
+			} \
+			waited = true; \
+		} \
+		return ret; \
+	} while (0)
+
+#ifdef PHP_WIN32
+# define PHP_IO_SOCKLEN(n) ((int) (n))
+#else
+# define PHP_IO_SOCKLEN(n) (n)
+#endif
+
+PHPAPI ssize_t php_io_sendto(php_stream *stream, php_socket_t fd, const void *buf, size_t len, int flags, const struct sockaddr *addr, socklen_t addrlen, php_deadline *dl)
+{
+	PHP_IO_READINESS_OP(stream, fd, PHP_POLL_WRITE, dl,
+			addr ? sendto(fd, buf, PHP_IO_SOCKLEN(len), flags, addr, PHP_IO_SOCKLEN(addrlen))
+			     : send(fd, buf, PHP_IO_SOCKLEN(len), flags));
+}
+
+PHPAPI ssize_t php_io_recvfrom(php_stream *stream, php_socket_t fd, void *buf, size_t len, int flags, struct sockaddr *addr, socklen_t *addrlen, php_deadline *dl)
+{
+	PHP_IO_READINESS_OP(stream, fd, PHP_POLL_READ, dl,
+			addr ? recvfrom(fd, buf, PHP_IO_SOCKLEN(len), flags, addr, addrlen)
+			     : recv(fd, buf, PHP_IO_SOCKLEN(len), flags));
+}
+
 PHPAPI php_socket_t php_io_accept(php_stream *stream, php_socket_t fd, struct sockaddr *addr, socklen_t *addrlen, php_deadline *dl)
 {
 	PHP_IO_DESCRIPTOR_OP(stream, fd, dl,
@@ -824,6 +918,7 @@ PHPAPI int php_io_connect(php_stream *stream, php_socket_t fd, const struct sock
 	php_io_op_result result;
 	int ret = 0;
 	bool direct = (php_io_hook_flags() & PHP_IO_HOOKS_F_DIRECT) != 0;
+	bool started = false;   /* our own connect() is in progress */
 
 	php_io_frame_begin(&f, stream);
 	memset(&op, 0, sizeof(op));
@@ -836,6 +931,7 @@ PHPAPI int php_io_connect(php_stream *stream, php_socket_t fd, const struct sock
 			ret = -1;
 			goto out;
 		}
+		started = true;
 	}
 
 	for (;;) {
@@ -846,7 +942,11 @@ PHPAPI int php_io_connect(php_stream *stream, php_socket_t fd, const struct sock
 			ret = -1;
 			break;
 		}
-		if (result.status == PHP_IO_READY) {
+		/* A provider that performs the op connects a socket whose connect
+		 * we started already: EISCONN then means it completed meanwhile
+		 * and the outcome is in SO_ERROR, as after a readiness report */
+		if (result.status == PHP_IO_READY
+				|| (started && result.status == PHP_IO_DONE && result.res < 0 && result.error == EISCONN)) {
 			int error = 0;
 			socklen_t len = sizeof(error);
 			if (getsockopt(fd, SOL_SOCKET, SO_ERROR, (char *) &error, &len) != 0) {
@@ -867,7 +967,7 @@ PHPAPI int php_io_connect(php_stream *stream, php_socket_t fd, const struct sock
 				ret = -1;
 				break;
 			}
-			php_io_op_poll(&op, f.handle, fd, PHP_POLL_WRITE, *dl);
+			started = true;
 			continue;
 		}
 		ssize_t r;
@@ -920,8 +1020,17 @@ static ssize_t php_io_file_op(php_stream *stream, int fd, php_deadline *dl, bool
 			offload = false;
 		}
 		if (!regular && FG(io_hooks) && !ready) {
-			/* A blocking descriptor: wait for readiness before the syscall */
-			int n = php_io_poll(NULL, fd, prep == php_io_op_read ? PHP_POLL_READ : PHP_POLL_WRITE, dl);
+			/* A blocking descriptor: wait for readiness before the syscall,
+			 * with the stream's identity so a handle keyed provider can */
+			uint32_t events = prep == php_io_op_read ? PHP_POLL_READ : PHP_POLL_WRITE;
+			php_io_op_poll(&op, f.handle, fd, events, *dl);
+			op.stream = stream;
+			if (php_io_run(&op, &result) == FAILURE) {
+				errno = ECANCELED;
+				ret = -1;
+				break;
+			}
+			int n = php_io_poll_result_to_revents(&result, events);
 			if (n < 0) {
 				ret = -1;
 				break;
@@ -1062,21 +1171,11 @@ PHPAPI int php_io_getnameinfo(const struct sockaddr *addr, socklen_t addrlen, in
 }
 
 #ifndef PHP_WIN32
-static int php_io_pidfd_open(pid_t pid)
-{
-#if defined(HAVE_PIDFD_OPEN)
-	return pidfd_open(pid, 0);
-#elif defined(__linux__) && defined(SYS_pidfd_open)
-	return (int) syscall(SYS_pidfd_open, pid, 0);
-#else
-	errno = ENOSYS;
-	return -1;
-#endif
-}
-
 /* The wait is the provider's; after Ready the core takes what a handle
  * recorded or asks the kernel without waiting, and waits again when
- * nothing changed yet */
+ * nothing changed yet. The op's descriptor is the platform's process or
+ * signal source (php_poll_process_source_open), so the C poll queue
+ * completes it Ready without any handle object. */
 PHPAPI pid_t php_io_waitpid(zend_object *handle, pid_t pid, int *status, int options, php_deadline *dl)
 {
 	int recorded;
@@ -1101,10 +1200,7 @@ PHPAPI pid_t php_io_waitpid(zend_object *handle, pid_t pid, int *status, int opt
 		watchable |= WCONTINUED;
 #endif
 		if (pid > 0 && !(options & watchable)) {
-			pidfd = php_io_pidfd_open(pid);
-			if (pidfd >= 0) {
-				fcntl(pidfd, F_SETFD, FD_CLOEXEC);
-			}
+			pidfd = php_poll_process_source_open(pid);
 		}
 
 		for (;;) {
@@ -1152,14 +1248,18 @@ PHPAPI pid_t php_io_waitpid(zend_object *handle, pid_t pid, int *status, int opt
 
 PHPAPI int php_io_sigwait(zend_object *handle, const php_sigset_t *set, php_siginfo_t *info, php_deadline *dl)
 {
-	if (FG(io_hooks)) {
+#ifdef HAVE_SIGTIMEDWAIT
+	bool as_op = FG(io_hooks) != NULL;
+#else
+	/* Without sigtimedwait() the synchronous wait is the op on the core
+	 * queue too, which serves the deadline from the signal source */
+	bool as_op = true;
+#endif
+	if (as_op) {
 		php_io_op op;
 		php_io_op_result result;
 		int ret;
-		int sfd = -1;
-#ifdef HAVE_SYS_SIGNALFD_H
-		sfd = signalfd(-1, set, SFD_NONBLOCK | SFD_CLOEXEC);
-#endif
+		int sfd = php_poll_signal_source_open(set);
 
 		for (;;) {
 			php_io_op_sigwait(&op, handle, set, info, *dl);
@@ -1180,9 +1280,8 @@ PHPAPI int php_io_sigwait(zend_object *handle, const php_sigset_t *set, php_sigi
 					ret = op.u.sigwait.taken;
 					break;
 				}
-				struct timespec zero = { 0, 0 };
-				ret = sigtimedwait(set, info, &zero);
-				if (ret > 0 || (errno != EAGAIN && errno != EINTR)) {
+				ret = php_poll_signal_source_take(sfd, set, info);
+				if (ret > 0) {
 					break;
 				}
 				continue;
@@ -1192,6 +1291,11 @@ PHPAPI int php_io_sigwait(zend_object *handle, const php_sigset_t *set, php_sigi
 				break;
 			}
 			if (result.status == PHP_IO_TIMEOUT) {
+				if (op.u.sigwait.taken > 0) {
+					/* The handle consumed it in the same reap as the deadline */
+					ret = op.u.sigwait.taken;
+					break;
+				}
 				errno = EAGAIN;
 				ret = -1;
 				break;
@@ -1209,6 +1313,8 @@ PHPAPI int php_io_sigwait(zend_object *handle, const php_sigset_t *set, php_sigi
 		}
 	}
 
+	/* Unsupported by the provider and by the core queue: no source */
+#ifdef HAVE_SIGTIMEDWAIT
 	if (php_deadline_is_infinite(dl)) {
 		return sigwaitinfo(set, info);
 	}
@@ -1218,6 +1324,24 @@ PHPAPI int php_io_sigwait(zend_object *handle, const php_sigset_t *set, php_sigi
 		.tv_nsec = remaining % ZEND_NANO_IN_SEC,
 	};
 	return sigtimedwait(set, info, &ts);
+#else
+	if (php_deadline_is_infinite(dl)) {
+		int signo;
+		int err = sigwait(set, &signo);
+		if (err != 0) {
+			errno = err;
+			return -1;
+		}
+		if (info) {
+			memset(info, 0, sizeof(*info));
+			info->si_signo = signo;
+		}
+		return signo;
+	}
+	/* A timed wait without a source has nothing to wait on here */
+	errno = ENOSYS;
+	return -1;
+#endif
 }
 #endif
 

@@ -177,6 +177,18 @@ static inline void php_poll_set_error(php_poll_ctx *ctx, php_poll_error error)
 	ctx->last_error = error;
 }
 
+/* Nanoseconds of a relative timeout, saturating instead of wrapping */
+static inline zend_hrtime_t php_poll_timespec_to_ns(const struct timespec *timeout)
+{
+	if (timeout == NULL || timeout->tv_sec < 0) {
+		return ZEND_HRTIME_T_MAX;
+	}
+	if ((zend_hrtime_t) timeout->tv_sec >= ZEND_HRTIME_T_MAX / ZEND_NANO_IN_SEC) {
+		return ZEND_HRTIME_T_MAX;
+	}
+	return (zend_hrtime_t) timeout->tv_sec * ZEND_NANO_IN_SEC + (zend_hrtime_t) timeout->tv_nsec;
+}
+
 static inline int php_poll_timespec_to_ms(const struct timespec *timeout)
 {
 	if (timeout == NULL) {

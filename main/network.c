@@ -236,7 +236,7 @@ PHPAPI int php_network_getaddresses(const char *host, int socktype, struct socka
 		sap++;
 	} while ((sai = sai->ai_next) != NULL);
 
-	freeaddrinfo(res);
+	php_io_freeaddrinfo(res);
 #else
 	if (!inet_pton(AF_INET, host, &in)) {
 		if(strlen(host) > MAXFQDNLEN) {

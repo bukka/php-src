@@ -145,6 +145,9 @@ static php_poll_ctx *php_poll_create_context(uint32_t flags)
 	}
 	ctx->persistent = persistent;
 	ctx->raw_events = (flags & PHP_POLL_FLAG_RAW_EVENTS) != 0;
+#ifndef PHP_WIN32
+	ctx->owner_pid = getpid();
+#endif
 
 	return ctx;
 }
@@ -164,16 +167,15 @@ PHPAPI php_poll_ctx *php_poll_create(php_poll_backend_type preferred_backend, ui
 		return NULL;
 	}
 	ctx->backend_type = preferred_backend;
-#ifndef PHP_WIN32
-	ctx->owner_pid = getpid();
-#endif
 
 	return ctx;
 }
 
-static bool php_poll_backend_has_fd_sources(php_poll_backend_type backend)
+/* The process and signal sources (poll_source.c) are descriptors, a pidfd
+ * or signalfd on Linux and a private kqueue on kqueue platforms, so any
+ * backend that watches descriptors of every kind serves them */
+static bool php_poll_backend_watches_any_descriptor(php_poll_backend_type backend)
 {
-#ifdef __linux__
 	if (backend == PHP_POLL_BACKEND_AUTO) {
 		if (num_registered_backends > 0 && registered_backends[0]) {
 			backend = registered_backends[0]->type;
@@ -181,21 +183,26 @@ static bool php_poll_backend_has_fd_sources(php_poll_backend_type backend)
 			return false;
 		}
 	}
-	/* A pidfd or signalfd is an ordinary descriptor for these */
-	return backend == PHP_POLL_BACKEND_EPOLL || backend == PHP_POLL_BACKEND_POLL;
-#else
-	return false;
-#endif
+	return backend == PHP_POLL_BACKEND_EPOLL || backend == PHP_POLL_BACKEND_POLL
+			|| backend == PHP_POLL_BACKEND_KQUEUE;
 }
 
 PHPAPI bool php_poll_backend_supports_process_handles(php_poll_backend_type backend)
 {
-	return php_poll_backend_has_fd_sources(backend);
+#ifdef PHP_WIN32
+	return false;
+#else
+	return php_poll_has_process_source() && php_poll_backend_watches_any_descriptor(backend);
+#endif
 }
 
 PHPAPI bool php_poll_backend_supports_signal_handles(php_poll_backend_type backend)
 {
-	return php_poll_backend_has_fd_sources(backend);
+#ifdef PHP_WIN32
+	return false;
+#else
+	return php_poll_has_signal_source() && php_poll_backend_watches_any_descriptor(backend);
+#endif
 }
 
 PHPAPI bool php_poll_backend_supports_priority(php_poll_backend_type backend)
@@ -546,7 +553,7 @@ PHPAPI int php_poll_wait(php_poll_ctx *ctx, php_poll_event *events, int max_even
 		}
 		zend_hrtime_t head = ctx->timers[0]->deadline;
 		zend_hrtime_t remaining = head > now ? head - now : 0;
-		if (!timeout || remaining < (zend_hrtime_t) timeout->tv_sec * ZEND_NANO_IN_SEC + (zend_hrtime_t) timeout->tv_nsec) {
+		if (!timeout || remaining < php_poll_timespec_to_ns(timeout)) {
 			timer_ts.tv_sec = remaining / ZEND_NANO_IN_SEC;
 			timer_ts.tv_nsec = remaining % ZEND_NANO_IN_SEC;
 			timeout = &timer_ts;
@@ -562,7 +569,7 @@ PHPAPI int php_poll_wait(php_poll_ctx *ctx, php_poll_event *events, int max_even
 		struct timespec rest_ts;
 		if (timeout) {
 			zend_hrtime_t now = zend_hrtime();
-			zend_hrtime_t rel = (zend_hrtime_t) timeout->tv_sec * ZEND_NANO_IN_SEC + (zend_hrtime_t) timeout->tv_nsec;
+			zend_hrtime_t rel = php_poll_timespec_to_ns(timeout);
 			limit = rel < ZEND_HRTIME_T_MAX - now ? now + rel : ZEND_HRTIME_T_MAX;
 		}
 		for (;;) {

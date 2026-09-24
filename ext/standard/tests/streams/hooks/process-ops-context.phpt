@@ -7,6 +7,7 @@ posix
 <?php
 if (!Io\Poll\Backend::Auto->supportsProcessHandles()) die("skip no process handle source");
 if (!Io\Poll\Backend::Auto->supportsSignalHandles()) die("skip no signal handle source");
+if (!function_exists("pcntl_sigwaitinfo")) die("skip pcntl_sigwaitinfo() is not available");
 ?>
 --FILE--
 <?php

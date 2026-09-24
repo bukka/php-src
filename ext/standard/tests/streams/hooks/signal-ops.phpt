@@ -3,6 +3,10 @@ IO hooks: pcntl_sigwaitinfo() and pcntl_sigtimedwait() are SigWait operations
 --EXTENSIONS--
 pcntl
 posix
+--SKIPIF--
+<?php
+if (!function_exists("pcntl_sigwaitinfo")) die("skip pcntl_sigwaitinfo() is not available");
+?>
 --FILE--
 <?php
 include __DIR__ . '/scheduler.inc';

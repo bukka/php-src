@@ -192,6 +192,18 @@ static bool poll_build_fds_callback(int fd, php_poll_fd_entry *entry, void *user
 	return true;
 }
 
+/* Nothing armed: wait out the timeout the way poll(2) does with an empty
+ * set, so a signal interrupts it and no timeout blocks like the other
+ * backends do */
+static int poll_backend_wait_nothing(php_poll_ctx *ctx, const struct timespec *timeout)
+{
+	if (poll(NULL, 0, php_poll_timespec_to_ms(timeout)) < 0) {
+		php_poll_set_current_errno_error(ctx);
+		return -1;
+	}
+	return 0;
+}
+
 static int poll_backend_wait(
 		php_poll_ctx *ctx, php_poll_event *events, int max_events,
 		const struct timespec *timeout)
@@ -200,10 +212,7 @@ static int poll_backend_wait(
 
 	int fd_count = php_poll_fd_table_count(backend_data->fd_table);
 	if (fd_count == 0) {
-		if (timeout != NULL && (timeout->tv_sec > 0 || timeout->tv_nsec > 0)) {
-			nanosleep(timeout, NULL);
-		}
-		return 0;
+		return poll_backend_wait_nothing(ctx, timeout);
 	}
 
 	/* Ensure temp_fds array is large enough */
@@ -223,10 +232,7 @@ static int poll_backend_wait(
 	php_poll_fd_table_foreach(backend_data->fd_table, poll_build_fds_callback, &build_ctx);
 	fd_count = build_ctx.index;
 	if (fd_count == 0) {
-		if (timeout != NULL && (timeout->tv_sec > 0 || timeout->tv_nsec > 0)) {
-			nanosleep(timeout, NULL);
-		}
-		return 0;
+		return poll_backend_wait_nothing(ctx, timeout);
 	}
 
 	/* Convert timespec to milliseconds (poll() only supports ms resolution) */
@@ -304,7 +310,12 @@ const php_poll_backend_ops php_poll_backend_poll_ops = {
 	.is_available = poll_backend_is_available,
 	.get_suitable_max_events = poll_backend_get_suitable_max_events,
 	.supports_et = false,
+#ifdef __APPLE__
+	/* Darwin's poll() never reports POLLPRI for urgent data */
+	.supports_priority = false,
+#else
 	.supports_priority = true,
+#endif
 };
 
 #endif

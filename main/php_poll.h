@@ -21,6 +21,10 @@
 #include "php_network.h"
 
 #include <time.h>
+#ifndef PHP_WIN32
+# include <signal.h>
+# include <sys/types.h>
+#endif
 
 /* ----- Public generic API ----- */
 
@@ -133,6 +137,25 @@ PHPAPI zend_result php_poll_timer_modify(php_poll_ctx *ctx, php_poll_timer *time
 PHPAPI void php_poll_timer_remove(php_poll_ctx *ctx, php_poll_timer *timer);
 /* Armed timers */
 PHPAPI uint32_t php_poll_timer_count(php_poll_ctx *ctx);
+
+#ifndef PHP_WIN32
+/* Native sources for process and signal handles: a descriptor readable when
+ * the child exited or a signal of the set is pending. A pidfd and a signalfd
+ * on Linux, a private kqueue with EVFILT_PROC or EVFILT_SIGNAL on kqueue
+ * platforms; -1 with ENOSYS where there is none, ESRCH for a process that
+ * is neither running nor a waitable child. Neither source reaps or
+ * consumes: the child is reaped with waitpid() by whoever watches it, and a
+ * pending signal is taken with php_poll_signal_source_take(). */
+PHPAPI bool php_poll_has_process_source(void);
+PHPAPI bool php_poll_has_signal_source(void);
+PHPAPI int php_poll_process_source_open(pid_t pid);
+PHPAPI int php_poll_signal_source_open(const sigset_t *set);
+/* Consume the next delivered signal of the set through the source, or from
+ * the pending set when fd is -1; 0 when nothing is pending. Never waits. */
+PHPAPI int php_poll_signal_source_take(int fd, const sigset_t *set, siginfo_t *info);
+/* Consume one pending signal of the set without waiting; 0 when none */
+PHPAPI int php_poll_signal_take_pending(const sigset_t *set, siginfo_t *info);
+#endif
 
 PHPAPI const char *php_poll_backend_name(php_poll_ctx *ctx);
 PHPAPI php_poll_backend_type php_poll_get_backend_type(php_poll_ctx *ctx);

@@ -1,5 +1,5 @@
 --TEST--
-Io\Poll\Backend::supportsPriority(): kqueue and WSAPoll cannot report Event::Priority
+Io\Poll\Backend::supportsPriority(): kqueue, WSAPoll and Darwin's poll() cannot report Event::Priority
 --FILE--
 <?php
 foreach (Io\Poll\Backend::cases() as $backend) {
@@ -12,6 +12,7 @@ foreach (Io\Poll\Backend::cases() as $backend) {
     }
     $expected = match ($backend) {
         Io\Poll\Backend::Kqueue, Io\Poll\Backend::WSAPoll => false,
+        Io\Poll\Backend::Poll => PHP_OS_FAMILY !== 'Darwin',
         default => true,
     };
     var_dump($backend->supportsPriority() === $expected);

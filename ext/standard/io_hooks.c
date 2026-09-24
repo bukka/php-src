@@ -78,6 +78,7 @@ typedef struct {
 struct _php_io_opqueue_sub {
 	zend_object *operation;
 	zval data;
+	php_io_opqueue_obj *owner;   /* the queue it is linked in */
 	php_io_opqueue_sub *prev;
 	php_io_opqueue_sub *next;
 };
@@ -156,11 +157,23 @@ PHPAPI zend_object *php_io_operation_get_zobj(php_io_op *op)
 	return op->zobj;
 }
 
+static void php_io_opqueue_sub_unlink(php_io_opqueue_obj *q, php_io_opqueue_sub *sub);
+static void php_io_opqueue_sub_free(php_io_opqueue_sub *sub);
+
 static void php_io_operation_detach(zend_object *zobj)
 {
 	php_io_operation_obj *intern = PHP_IO_OPERATION_FROM_ZOBJ(zobj);
 	php_io_op *op = intern->op;
 	intern->op = NULL;
+	/* Ended without a delivery (cancelled, orphaned): the submission
+	 * record of a queue of ours goes with it, or it would keep the
+	 * operation and its data alive for the life of the queue */
+	if (op && op->provider_data) {
+		php_io_opqueue_sub *sub = op->provider_data;
+		op->provider_data = NULL;
+		php_io_opqueue_sub_unlink(sub->owner, sub);
+		php_io_opqueue_sub_free(sub);
+	}
 #ifndef PHP_WIN32
 	/* What a signal handle consumed for this wait goes back with the op */
 	if (op && op->type == PHP_IO_OP_SIGWAIT && op->u.sigwait.taken == 0) {
@@ -481,8 +494,10 @@ PHP_METHOD(Io_Operation_GetAddrInfo, getService)
 	RETURN_STRING(op->u.getaddrinfo.service);
 }
 
-/* The list is built the way the C library builds its own, one block per
- * entry with the address behind the addrinfo, so freeaddrinfo() frees it */
+/* The list is one malloc() block per entry with the address behind the
+ * addrinfo; freeaddrinfo() would free it on glibc but not on macOS, whose
+ * C library frees ai_addr on its own, so it is registered for
+ * php_io_freeaddrinfo() instead */
 PHP_METHOD(Io_Operation_GetAddrInfo, completeWithAddresses)
 {
 	zval *addresses;
@@ -543,14 +558,13 @@ PHP_METHOD(Io_Operation_GetAddrInfo, completeWithAddresses)
 		php_io_completion_create(return_value, op, Z_OBJ_P(ZEND_THIS), PHP_IO_DONE, -1, EAI_NONAME, NULL, NULL);
 		return;
 	}
+	php_io_addrinfo_register(head);
 	*op->u.getaddrinfo.res = head;
 	php_io_completion_create(return_value, op, Z_OBJ_P(ZEND_THIS), PHP_IO_DONE, 0, 0, NULL, NULL);
 	return;
 
 fail:
-	if (head) {
-		freeaddrinfo(head);
-	}
+	php_io_addrinfo_free_list(head);
 	RETURN_THROWS();
 }
 
@@ -766,6 +780,11 @@ static void php_io_poll_operation_queue_free_object(zend_object *obj)
 	}
 	while (intern->subs) {
 		php_io_opqueue_sub *sub = intern->subs;
+		/* An op still on a suspended frame must not find the record later */
+		php_io_op *op = PHP_IO_OPERATION_FROM_ZOBJ(sub->operation)->op;
+		if (op && op->provider_data == sub) {
+			op->provider_data = NULL;
+		}
 		php_io_opqueue_sub_unlink(intern, sub);
 		php_io_opqueue_sub_free(sub);
 	}
@@ -857,6 +876,7 @@ PHP_METHOD(Io_Poll_OperationQueue, submit)
 	} else {
 		ZVAL_NULL(&sub->data);
 	}
+	sub->owner = intern;
 	sub->prev = NULL;
 	sub->next = intern->subs;
 	if (intern->subs) {

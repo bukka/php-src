@@ -49,9 +49,16 @@ PHPAPI int php_io_poll_signal_handle_take(zend_object *handle, const sigset_t *s
 PHPAPI void php_poll_notify(zend_object *handle);
 
 /* An Io\Poll\NotifyHandle over a descriptor someone else owns and clears,
- * such as a ring's notification descriptor. notify() is unavailable on it. */
+ * such as a ring's notification descriptor. notify() is unavailable on it.
+ * The handle keeps a reference on owner, the object whose descriptor it is. */
 PHPAPI void php_io_poll_notify_handle_create_external(zval *dest, php_socket_t fd,
-		void (*clear)(void *arg), void *arg);
+		void (*clear)(void *arg), void *arg, zend_object *owner);
+
+#ifndef PHP_WIN32
+/* The signal mask for a child about to exec: the current one without the
+ * signals that live SignalHandle objects blocked */
+PHPAPI void php_io_poll_signal_child_mask(sigset_t *mask);
+#endif
 PHPAPI void php_stream_poll_weak_handle_from_stream(zval *dest, php_stream *stream);
 PHPAPI void php_stream_poll_weak_handle_notify(zend_object *handle_obj);
 PHPAPI void php_io_poll_handle_remove_from_all_contexts(zend_object *handle_obj);

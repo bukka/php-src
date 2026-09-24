@@ -22,7 +22,7 @@ try {
 
 $ctx = new Io\Poll\Context();
 $handle = new Io\Poll\SignalHandle([SIGUSR1, SIGUSR2]);
-var_dump($handle->getSignals());
+var_dump($handle->getSignals() === [SIGUSR1, SIGUSR2]);
 
 // The handle blocked its signals
 pcntl_sigprocmask(SIG_UNBLOCK, [SIGWINCH], $blocked);
@@ -62,12 +62,7 @@ var_dump(in_array(SIGUSR1, $blocked), in_array(SIGUSR2, $blocked));
 --EXPECTF--
 Io\Poll\SignalHandle::__construct(): Argument #1 ($signals) must not be empty
 Io\Poll\SignalHandle::__construct(): Argument #1 ($signals) signals must be between 1 and %d
-array(2) {
-  [0]=>
-  int(10)
-  [1]=>
-  int(12)
-}
+bool(true)
 bool(true)
 bool(true)
 Io\Poll\Context::add(): Argument #2 ($events) must be Event::Signal for a SignalHandle

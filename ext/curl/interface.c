@@ -2634,6 +2634,8 @@ static CURLcode php_curl_exec_multi(php_curl *ch)
 		}
 
 		if (php_curl_socket_reconcile(ch) == FAILURE) {
+			/* The provider threw: the transfer did not finish */
+			result = CURLE_ABORTED_BY_CALLBACK;
 			break;
 		}
 
@@ -2665,6 +2667,8 @@ static CURLcode php_curl_exec_multi(php_curl *ch)
 		zend_result rc = php_io_run(&any, &any_result);
 
 		if (rc == FAILURE) {
+			/* Cancelled or the provider threw: the transfer did not finish */
+			result = CURLE_ABORTED_BY_CALLBACK;
 			efree(members);
 			efree(results);
 			break;

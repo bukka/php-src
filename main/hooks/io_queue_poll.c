@@ -551,6 +551,15 @@ static int php_io_poll_queue_wait(php_io_queue *base, php_io_queue_completion *o
 			return -1;
 		}
 
+		/* Descriptors first: completing a timed out request drops its
+		 * registration when nothing else holds it, and the same reap may
+		 * still carry an event for that registration. A request whose
+		 * readiness came in this reap keeps it, and its timer is skipped. */
+		for (int i = 0; i < n; i++) {
+			if (!(q->events[i].revents & PHP_POLL_TIMER)) {
+				php_io_poll_fdreg_fire(q, q->events[i].data, q->events[i].revents);
+			}
+		}
 		for (int i = 0; i < n; i++) {
 			if (q->events[i].revents & PHP_POLL_TIMER) {
 				php_io_poll_req *req = q->events[i].data;
@@ -560,8 +569,6 @@ static int php_io_poll_queue_wait(php_io_queue *base, php_io_queue_completion *o
 				}
 				php_io_status status = req->op->type == PHP_IO_OP_TIMER ? PHP_IO_DONE : PHP_IO_TIMEOUT;
 				php_io_poll_req_complete(q, req, status, 0, 0);
-			} else {
-				php_io_poll_fdreg_fire(q, q->events[i].data, q->events[i].revents);
 			}
 		}
 

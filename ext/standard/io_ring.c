@@ -107,7 +107,7 @@ PHP_METHOD(Io_Ring_Engine, getHandle)
 		zend_throw_exception(php_io_ring_exception_ce, "The ring has no notification descriptor", 0);
 		RETURN_THROWS();
 	}
-	php_io_poll_notify_handle_create_external(return_value, fd, php_io_ring_engine_notify_clear, ring);
+	php_io_poll_notify_handle_create_external(return_value, fd, php_io_ring_engine_notify_clear, ring, Z_OBJ_P(ZEND_THIS));
 }
 
 #endif /* HAVE_IOR */

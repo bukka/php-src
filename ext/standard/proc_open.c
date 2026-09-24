@@ -149,6 +149,7 @@ fail:
 
 #include "proc_open.h"
 #include "main/hooks/io_hooks.h"
+#include "ext/standard/io_poll.h"
 
 static int le_proc_open; /* Resource number for `proc` resources */
 
@@ -1425,13 +1426,22 @@ PHP_FUNCTION(proc_open)
 		}
 	}
 
+	/* Signals blocked for a SignalHandle are the parent's business */
+	posix_spawnattr_t attr;
+	sigset_t child_mask;
+	posix_spawnattr_init(&attr);
+	php_io_poll_signal_child_mask(&child_mask);
+	posix_spawnattr_setsigmask(&attr, &child_mask);
+	posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGMASK);
+
 	if (argv) {
-		r = posix_spawnp(&child, ZSTR_VAL(command_str), &factions, NULL, argv, (env.envarray ? env.envarray : environ));
+		r = posix_spawnp(&child, ZSTR_VAL(command_str), &factions, &attr, argv, (env.envarray ? env.envarray : environ));
 	} else {
-		r = posix_spawn(&child, "/bin/sh" , &factions, NULL,
+		r = posix_spawn(&child, "/bin/sh" , &factions, &attr,
 				(char * const[]) {"sh", "-c", ZSTR_VAL(command_str), NULL},
 				env.envarray ? env.envarray : environ);
 	}
+	posix_spawnattr_destroy(&attr);
 	posix_spawn_file_actions_destroy(&factions);
 	if (r != 0) {
 		php_error_docref(NULL, E_WARNING, "posix_spawn() failed: %s", strerror(r));
@@ -1454,6 +1464,11 @@ PHP_FUNCTION(proc_open)
 		if (cwd) {
 			php_ignore_value(chdir(cwd));
 		}
+
+		/* Signals blocked for a SignalHandle are the parent's business */
+		sigset_t child_mask;
+		php_io_poll_signal_child_mask(&child_mask);
+		sigprocmask(SIG_SETMASK, &child_mask, NULL);
 
 		if (argv) {
 			/* execvpe() is non-portable, use environ instead. */

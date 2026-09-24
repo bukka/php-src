@@ -778,6 +778,7 @@ AS_VAR_IF([PHP_IOR], [no],, [
   AC_DEFINE([HAVE_IOR], [1], [Define to 1 if the ior library is available.])
   PHP_ADD_SOURCES([main/ring], [php_io_ring.c],
     [-DZEND_ENABLE_STATIC_TSRMLS_CACHE=1])
+])
 
 PHP_ARG_WITH([valgrind],
   [whether to enable Valgrind support],
@@ -1732,13 +1733,12 @@ PHP_ADD_SOURCES([main/poll], m4_normalize([
     poll_core.c
     poll_fd_table.c
     poll_handle.c
+    poll_source.c
   ]),
   [-DZEND_ENABLE_STATIC_TSRMLS_CACHE=1])
 
 PHP_ADD_SOURCES([main/hooks], [io_hooks.c io_queue_poll.c],
   [-DZEND_ENABLE_STATIC_TSRMLS_CACHE=1])
-
-])
 
 PHP_ADD_SOURCES([main/streams], m4_normalize([
     cast.c

@@ -18,6 +18,7 @@
 #include "php_open_temporary_file.h"
 #include "ext/standard/file.h"
 #include "main/hooks/io_hooks.h"
+#include "ext/standard/io_poll.h"
 #include "ext/standard/flock_compat.h"
 #include "ext/standard/php_filestat.h"
 #include <stddef.h>
@@ -425,6 +426,10 @@ PHPAPI php_stream *_php_stream_popen(const char *command, const char *mode STREA
 			_exit(127);
 		}
 #endif
+		/* Signals blocked for a SignalHandle are the parent's business */
+		sigset_t mask;
+		php_io_poll_signal_child_mask(&mask);
+		sigprocmask(SIG_SETMASK, &mask, NULL);
 		execl("/bin/sh", "sh", "-c", command, (char *) NULL);
 		_exit(127);
 	}
