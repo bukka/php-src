@@ -15,7 +15,7 @@
 
 #ifdef HAVE_IOR
 
-#include <ior.h>
+#include <ior/ior.h>
 #include <errno.h>
 #include <netdb.h>
 
@@ -30,7 +30,6 @@ struct _php_io_ring_req {
 	php_io_op_result result;
 	php_io_ring_req *group;         /* member: the Any's request */
 	uint32_t index;                 /* member: position in the Any */
-	ior_timespec ts;                /* the timer's or linked timeout's duration; a backend may read it after submit */
 	bool has_lt;                    /* a linked timeout was submitted */
 	bool main_done;                 /* the main cqe was reaped */
 	bool lt_done;                   /* the linked timeout's cqe was reaped */
@@ -278,7 +277,8 @@ static uint32_t php_io_ring_poll_mask_from_ior(uint32_t mask)
 }
 
 /* Relative, because zend_hrtime() runs on CLOCK_MONOTONIC_RAW where it
- * exists and ior's absolute deadlines on CLOCK_MONOTONIC */
+ * exists and ior's absolute deadlines offer the monotonic, boot-time and
+ * wall clocks; ior copies the timespec at submit */
 static void php_io_ring_deadline_to_ts(const php_deadline *dl, ior_timespec *ts)
 {
 	zend_hrtime_t remaining = php_io_deadline_remaining(dl, zend_hrtime());
@@ -294,6 +294,7 @@ static zend_result php_io_ring_submit_one(php_io_ring *ring, php_io_ring_req *re
 	php_io_op *op = req->op;
 	ior_ctx *ctx = ring->ctx;
 	bool link_deadline = !php_deadline_is_infinite(&op->deadline) && op->type != PHP_IO_OP_TIMER;
+	ior_timespec ts;   /* read by ior_submit() below */
 
 	ior_sqe *sqe = ior_get_sqe(ctx);
 	if (!sqe) {
@@ -315,8 +316,8 @@ static zend_result php_io_ring_submit_one(php_io_ring *ring, php_io_ring_req *re
 				errno = ENOTSUP;
 				return FAILURE;
 			}
-			php_io_ring_deadline_to_ts(&op->deadline, &req->ts);
-			ior_prep_timeout(ctx, sqe, &req->ts, 0, 0);
+			php_io_ring_deadline_to_ts(&op->deadline, &ts);
+			ior_prep_timeout(ctx, sqe, &ts, 0, 0);
 			break;
 		}
 		case PHP_IO_OP_READ:
@@ -381,8 +382,8 @@ static zend_result php_io_ring_submit_one(php_io_ring *ring, php_io_ring_req *re
 			ior_submit(ctx);
 		} else {
 			ior_sqe_set_flags(ctx, sqe, IOR_SQE_IO_LINK);
-			php_io_ring_deadline_to_ts(&op->deadline, &req->ts);
-			ior_prep_link_timeout(ctx, lt, &req->ts, 0);
+			php_io_ring_deadline_to_ts(&op->deadline, &ts);
+			ior_prep_link_timeout(ctx, lt, &ts, 0);
 			ior_sqe_set_data(ctx, lt, (void *) ((uintptr_t) req | PHP_IO_RING_TAG_LT));
 			req->has_lt = true;
 		}
