@@ -1,0 +1,30 @@
+name: Build ior
+# Temporary, for the IO hooks proof of concept only: the ring (main/ring)
+# is built on the ior library, which will be bundled with php-src once the
+# design settles. Until then CI fetches it from its repository and builds it
+# into a prefix that ./configure finds through pkg-config (--with-ior).
+inputs:
+  ref:
+    default: main
+    required: false
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -x
+        IOR_PREFIX="$HOME/ior"
+        IOR_SRC="$RUNNER_TEMP/ior-src"
+        rm -rf "$IOR_SRC"
+        git clone --depth 1 --branch "${{ inputs.ref }}" https://github.com/libior/ior.git "$IOR_SRC"
+        # Both Linux backends in one library, so IOR_BACKEND=threads can
+        # select the thread pool at run time; a no-op elsewhere
+        cmake -S "$IOR_SRC" -B "$IOR_SRC/build" \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX="$IOR_PREFIX" \
+          -DIOR_WITH_THREADS=ON \
+          -DIOR_BUILD_TESTS=OFF \
+          -DIOR_BUILD_BENCH=OFF
+        cmake --build "$IOR_SRC/build" --parallel
+        cmake --install "$IOR_SRC/build"
+        echo "PKG_CONFIG_PATH=$IOR_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
