@@ -148,6 +148,7 @@ fail:
 #endif
 
 #include "proc_open.h"
+#include "main/hooks/io_hooks.h"
 
 static int le_proc_open; /* Resource number for `proc` resources */
 
@@ -254,7 +255,8 @@ static pid_t waitpid_cached(php_process_handle *proc, int *wait_status, int opti
 		return proc->child;
 	}
 
-	pid_t wait_pid = waitpid(proc->child, wait_status, options);
+	php_deadline dl = php_io_deadline_infinite();
+	pid_t wait_pid = php_io_waitpid(NULL, proc->child, wait_status, options, &dl);
 
 	/* The "exit" status is the final status of the process.
 	 * If we were to cache the status unconditionally,
@@ -371,6 +373,16 @@ PHP_FUNCTION(proc_terminate)
 /* }}} */
 
 /* {{{ Close a process opened by `proc_open` */
+PHPAPI bool php_proc_open_get_pid(zval *zproc, php_process_id_t *pid)
+{
+	php_process_handle *proc = (php_process_handle*)zend_fetch_resource(Z_RES_P(zproc), "process", le_proc_open);
+	if (proc == NULL) {
+		return false;
+	}
+	*pid = proc->child;
+	return true;
+}
+
 PHP_FUNCTION(proc_close)
 {
 	zval *zproc;

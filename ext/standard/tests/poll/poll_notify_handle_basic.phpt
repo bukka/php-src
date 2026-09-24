@@ -67,5 +67,5 @@ Events count: 0
 Events count: 1
 Io\Poll\Context::add(): Argument #2 ($events) must be Event::Notify for a NotifyHandle
 Io\Poll\Context::add(): Argument #2 ($events) must be Event::Notify for a NotifyHandle
-Io\Poll\Context::add(): Argument #2 ($events) must not contain Event::Timer or Event::Notify for this handle
+Io\Poll\Context::add(): Argument #2 ($events) must not contain Event::Timer, Event::Notify, Event::Signal or Event::Process for this handle
 bool(false)

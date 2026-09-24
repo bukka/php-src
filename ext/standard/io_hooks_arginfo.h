@@ -1,5 +1,5 @@
 /* This is a generated file, edit io_hooks.stub.php instead.
- * Stub hash: 017285c42f4a672145ede1a3a5f18b5ec1526b82
+ * Stub hash: afd88e912f147555020c980a2e7ca6c482f22a2e
  * Has decl header: yes */
 
 #include "zend_enum.h"
@@ -103,6 +103,10 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_Io_Operation_Fsync_isDataOnly arginfo_Io_Hooks_is_active
 
+#define arginfo_class_Io_Operation_WaitPid_getPid arginfo_class_Io_Completion_getResult
+
+#define arginfo_class_Io_Operation_SigWait_getSignals arginfo_class_Io_Operation_getEvents
+
 #define arginfo_class_Io_Operation_GetAddrInfo_getHost arginfo_class_Io_Operation_Connect_getAddress
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Io_Operation_GetAddrInfo_getService, 0, 0, IS_STRING, 1)
@@ -185,6 +189,8 @@ ZEND_METHOD(Io_Operation_Send, getLength);
 ZEND_METHOD(Io_Operation_Send, getFlags);
 ZEND_METHOD(Io_Operation_Connect, getAddress);
 ZEND_METHOD(Io_Operation_Fsync, isDataOnly);
+ZEND_METHOD(Io_Operation_WaitPid, getPid);
+ZEND_METHOD(Io_Operation_SigWait, getSignals);
 ZEND_METHOD(Io_Operation_GetAddrInfo, getHost);
 ZEND_METHOD(Io_Operation_GetAddrInfo, getService);
 ZEND_METHOD(Io_Operation_GetAddrInfo, completeWithAddresses);
@@ -279,6 +285,16 @@ static const zend_function_entry class_Io_Operation_Connect_methods[] = {
 
 static const zend_function_entry class_Io_Operation_Fsync_methods[] = {
 	ZEND_ME(Io_Operation_Fsync, isDataOnly, arginfo_class_Io_Operation_Fsync_isDataOnly, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_Io_Operation_WaitPid_methods[] = {
+	ZEND_ME(Io_Operation_WaitPid, getPid, arginfo_class_Io_Operation_WaitPid_getPid, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_Io_Operation_SigWait_methods[] = {
+	ZEND_ME(Io_Operation_SigWait, getSignals, arginfo_class_Io_Operation_SigWait_getSignals, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 
@@ -466,6 +482,26 @@ static zend_class_entry *register_class_Io_Operation_Fsync(zend_class_entry *cla
 	zend_class_entry ce, *class_entry;
 
 	INIT_NS_CLASS_ENTRY(ce, "Io\\Operation", "Fsync", class_Io_Operation_Fsync_methods);
+	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Io_Operation, ZEND_ACC_FINAL);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_Io_Operation_WaitPid(zend_class_entry *class_entry_Io_Operation)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "Io\\Operation", "WaitPid", class_Io_Operation_WaitPid_methods);
+	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Io_Operation, ZEND_ACC_FINAL);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_Io_Operation_SigWait(zend_class_entry *class_entry_Io_Operation)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "Io\\Operation", "SigWait", class_Io_Operation_SigWait_methods);
 	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Io_Operation, ZEND_ACC_FINAL);
 
 	return class_entry;

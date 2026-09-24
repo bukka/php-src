@@ -135,6 +135,7 @@ PHPAPI int php_stream_parse_fopen_modes(const char *mode, int *open_flags)
 typedef struct {
 	FILE *file;
 	int fd;					/* underlying file descriptor */
+	int child_pid;			/* php_stream_popen(): the child to wait for at close, else 0 */
 	unsigned is_process_pipe:1;	/* use pclose instead of fclose */
 	unsigned is_pipe:1;		/* stream is an actual pipe, currently Windows only*/
 	unsigned cached_fstat:1;	/* sb is valid */
@@ -385,6 +386,67 @@ PHPAPI php_stream *_php_stream_fopen_from_pipe(FILE *file, const char *mode STRE
 	return stream;
 }
 
+#ifndef PHP_WIN32
+PHPAPI php_stream *_php_stream_popen(const char *command, const char *mode STREAMS_DC)
+{
+	bool reading = mode[0] == 'r';
+	int fds[2];
+
+#ifdef HAVE_PIPE2
+	if (pipe2(fds, O_CLOEXEC) != 0) {
+		return NULL;
+	}
+#else
+	if (pipe(fds) != 0) {
+		return NULL;
+	}
+	fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+	fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+#endif
+
+	pid_t pid = fork();
+	if (pid < 0) {
+		int err = errno;
+		close(fds[0]);
+		close(fds[1]);
+		errno = err;
+		return NULL;
+	}
+	if (pid == 0) {
+		int child_end = reading ? fds[1] : fds[0];
+		int std_fd = reading ? STDOUT_FILENO : STDIN_FILENO;
+		if (child_end == std_fd) {
+			fcntl(child_end, F_SETFD, 0);
+		} else {
+			dup2(child_end, std_fd);
+		}
+#ifdef VIRTUAL_DIR
+		if (CWDG(cwd).cwd_length > 0 && chdir(CWDG(cwd).cwd) != 0) {
+			_exit(127);
+		}
+#endif
+		execl("/bin/sh", "sh", "-c", command, (char *) NULL);
+		_exit(127);
+	}
+
+	int parent_end = reading ? fds[0] : fds[1];
+	close(reading ? fds[1] : fds[0]);
+	FILE *fp = fdopen(parent_end, reading ? "r" : "w");
+	if (fp == NULL) {
+		int err = errno;
+		close(parent_end);
+		errno = err;
+		return NULL;
+	}
+
+	php_stream *stream = _php_stream_fopen_from_pipe(fp, mode STREAMS_REL_CC);
+	if (stream) {
+		((php_stdio_stream_data *) stream->abstract)->child_pid = (int) pid;
+	}
+	return stream;
+}
+#endif
+
 static ssize_t php_stdiop_write(php_stream *stream, const char *buf, size_t count)
 {
 	php_stdio_stream_data *data = (php_stdio_stream_data*)stream->abstract;
@@ -556,10 +618,26 @@ static int php_stdiop_close(php_stream *stream, int close_handle)
 		if (data->file) {
 			if (data->is_process_pipe) {
 				errno = 0;
-				ret = pclose(data->file);
+#ifndef PHP_WIN32
+				if (data->child_pid > 0) {
+					/* The pipe closes first so the child sees EOF, then the wait is an op */
+					int wstatus = 0;
+					pid_t wp;
+					php_deadline dl = php_io_deadline_infinite();
+					fclose(data->file);
+					data->file = NULL;
+					do {
+						wp = php_io_waitpid(NULL, (pid_t) data->child_pid, &wstatus, 0, &dl);
+					} while (wp == -1 && errno == EINTR);
+					ret = wp > 0 ? wstatus : -1;
+				} else
+#endif
+				{
+					ret = pclose(data->file);
+				}
 
 #ifdef HAVE_SYS_WAIT_H
-				if (WIFEXITED(ret)) {
+				if (ret != -1 && WIFEXITED(ret)) {
 					ret = WEXITSTATUS(ret);
 				}
 #endif

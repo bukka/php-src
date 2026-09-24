@@ -630,6 +630,8 @@ AC_FUNC_STRERROR_R
 
 dnl Check for functions inside their belonging headers.
 AC_CHECK_HEADER([sys/prctl.h], [AC_CHECK_FUNCS([prctl])])
+AC_CHECK_HEADERS([sys/signalfd.h sys/pidfd.h])
+AC_CHECK_FUNCS([pidfd_open signalfd pipe2])
 AC_CHECK_HEADER([sys/procctl.h], [AC_CHECK_FUNCS([procctl])])
 
 AX_FUNC_WHICH_GETHOSTBYNAME_R

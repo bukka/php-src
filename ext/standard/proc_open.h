@@ -48,3 +48,6 @@ typedef struct _php_process_handle {
 	bool has_cached_exit_wait_status;
 #endif
 } php_process_handle;
+
+/* The pid of a proc_open() resource; false with an exception when it is not one */
+PHPAPI bool php_proc_open_get_pid(zval *zproc, php_process_id_t *pid);

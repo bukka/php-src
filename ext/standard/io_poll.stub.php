@@ -30,6 +30,12 @@ namespace Io\Poll {
 
         /** Whether Event::Priority is reported; kqueue and WSAPoll cannot. */
         public function supportsPriority(): bool {}
+
+        /** Whether a ProcessHandle can be added: a pidfd on Linux, EVFILT_PROC on kqueue. */
+        public function supportsProcessHandles(): bool {}
+
+        /** Whether a SignalHandle can be added: a signalfd on Linux, EVFILT_SIGNAL on kqueue. */
+        public function supportsSignalHandles(): bool {}
     }
 
     // Keep in sync with main/php_poll.h!
@@ -47,6 +53,10 @@ namespace Io\Poll {
         case Timer;
         /** A NotifyHandle is raised and not yet cleared */
         case Notify;
+        /** A SignalHandle delivered a signal */
+        case Signal;
+        /** A ProcessHandle: the child exited and its status is in the handle */
+        case Process;
     }
 
     interface Handle
@@ -74,6 +84,46 @@ namespace Io\Poll {
         public function getTimeout(): \Time\Duration {}
 
         public function isPeriodic(): bool {}
+    }
+
+    /**
+     * Signals as events. The signals are blocked in the process signal mask
+     * for the life of the handle, so they queue instead of running a
+     * handler; a delivery is consumed and recorded when the context reports
+     * Event::Signal.
+     * @strict-properties
+     * @not-serializable
+     */
+    final class SignalHandle implements Handle
+    {
+        /** @param list<int> $signals */
+        public function __construct(array $signals) {}
+
+        /** @return list<int> */
+        public function getSignals(): array {}
+
+        /** @return list<int> signals delivered since the previous call, in order */
+        public function getDelivered(): array {}
+    }
+
+    /**
+     * A child process by pid. When the context reports Event::Process the
+     * child was reaped through the handle and getStatus() has its wait
+     * status; a later proc_close() or pcntl_waitpid() on it reads that.
+     * @strict-properties
+     * @not-serializable
+     */
+    final class ProcessHandle implements Handle
+    {
+        public function __construct(int $pid) {}
+
+        /** @param resource $process a proc_open() resource */
+        public static function fromProcess($process): static {}
+
+        public function getPid(): int {}
+
+        /** The wait status once the child was reaped through this handle, null before. */
+        public function getStatus(): ?int {}
     }
 
     /**

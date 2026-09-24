@@ -13,6 +13,9 @@
 */
 
 #include "php_poll_internal.h"
+#ifndef PHP_WIN32
+# include <unistd.h>
+#endif
 
 /* Backend registry */
 static const php_poll_backend_ops *registered_backends[8];
@@ -161,8 +164,38 @@ PHPAPI php_poll_ctx *php_poll_create(php_poll_backend_type preferred_backend, ui
 		return NULL;
 	}
 	ctx->backend_type = preferred_backend;
+#ifndef PHP_WIN32
+	ctx->owner_pid = getpid();
+#endif
 
 	return ctx;
+}
+
+static bool php_poll_backend_has_fd_sources(php_poll_backend_type backend)
+{
+#ifdef __linux__
+	if (backend == PHP_POLL_BACKEND_AUTO) {
+		if (num_registered_backends > 0 && registered_backends[0]) {
+			backend = registered_backends[0]->type;
+		} else {
+			return false;
+		}
+	}
+	/* A pidfd or signalfd is an ordinary descriptor for these */
+	return backend == PHP_POLL_BACKEND_EPOLL || backend == PHP_POLL_BACKEND_POLL;
+#else
+	return false;
+#endif
+}
+
+PHPAPI bool php_poll_backend_supports_process_handles(php_poll_backend_type backend)
+{
+	return php_poll_backend_has_fd_sources(backend);
+}
+
+PHPAPI bool php_poll_backend_supports_signal_handles(php_poll_backend_type backend)
+{
+	return php_poll_backend_has_fd_sources(backend);
 }
 
 PHPAPI bool php_poll_backend_supports_priority(php_poll_backend_type backend)
@@ -402,8 +435,21 @@ static int php_poll_timer_report(php_poll_ctx *ctx, php_poll_event *events, int 
 }
 
 /* Add file descriptor */
+static zend_always_inline bool php_poll_ctx_foreign(php_poll_ctx *ctx)
+{
+#ifdef PHP_WIN32
+	return false;
+#else
+	return ctx->owner_pid != getpid();
+#endif
+}
+
 PHPAPI zend_result php_poll_add(php_poll_ctx *ctx, int fd, uint32_t events, void *data)
 {
+	if (php_poll_ctx_foreign(ctx)) {
+		ctx->last_error = PHP_POLL_ERR_PERMISSION;
+		return FAILURE;
+	}
 	ZEND_ASSERT(ctx);
 	if (UNEXPECTED(!ctx->initialized || fd < 0)) {
 		php_poll_set_error(ctx, PHP_POLL_ERR_INVALID);
@@ -426,6 +472,10 @@ PHPAPI zend_result php_poll_add(php_poll_ctx *ctx, int fd, uint32_t events, void
 /* Modify file descriptor */
 PHPAPI zend_result php_poll_modify(php_poll_ctx *ctx, int fd, uint32_t events, void *data)
 {
+	if (php_poll_ctx_foreign(ctx)) {
+		ctx->last_error = PHP_POLL_ERR_PERMISSION;
+		return FAILURE;
+	}
 	ZEND_ASSERT(ctx);
 	if (UNEXPECTED(!ctx->initialized || fd < 0)) {
 		php_poll_set_error(ctx, PHP_POLL_ERR_INVALID);
@@ -448,6 +498,10 @@ PHPAPI zend_result php_poll_modify(php_poll_ctx *ctx, int fd, uint32_t events, v
 /* Remove file descriptor */
 PHPAPI zend_result php_poll_remove(php_poll_ctx *ctx, int fd)
 {
+	if (php_poll_ctx_foreign(ctx)) {
+		ctx->last_error = PHP_POLL_ERR_PERMISSION;
+		return FAILURE;
+	}
 	ZEND_ASSERT(ctx);
 	if (UNEXPECTED(!ctx->initialized || fd < 0)) {
 		php_poll_set_error(ctx, PHP_POLL_ERR_INVALID);
@@ -466,6 +520,10 @@ PHPAPI zend_result php_poll_remove(php_poll_ctx *ctx, int fd)
 PHPAPI int php_poll_wait(php_poll_ctx *ctx, php_poll_event *events, int max_events,
 		const struct timespec *timeout)
 {
+	if (php_poll_ctx_foreign(ctx)) {
+		ctx->last_error = PHP_POLL_ERR_PERMISSION;
+		return -1;
+	}
 	ZEND_ASSERT(ctx);
 	if (UNEXPECTED(!ctx->initialized || !events || max_events <= 0)) {
 		php_poll_set_error(ctx, PHP_POLL_ERR_INVALID);

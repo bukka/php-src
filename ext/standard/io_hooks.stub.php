@@ -154,6 +154,20 @@ namespace Io\Operation {
         public function isDataOnly(): bool {}
     }
 
+    /** A wait for a child; the handle is a Poll\ProcessHandle for a pid, null for any child. */
+    final class WaitPid extends \Io\Operation
+    {
+        /** The pid, or -1 for any child */
+        public function getPid(): int {}
+    }
+
+    /** A wait for one of a set of signals; the handle is a Poll\SignalHandle over the set. */
+    final class SigWait extends \Io\Operation
+    {
+        /** @return list<int> */
+        public function getSignals(): array {}
+    }
+
     /** A name lookup; no handle. */
     final class GetAddrInfo extends \Io\Operation
     {

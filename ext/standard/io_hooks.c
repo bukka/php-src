@@ -23,6 +23,7 @@
 #include "ext/standard/io_hooks.h"
 #include "ext/date/php_time.h"
 #include "io_hooks_arginfo.h"
+#include <signal.h>
 #include "io_hooks_decl.h"
 
 #include <errno.h>
@@ -41,6 +42,8 @@ static zend_class_entry *php_io_operation_send_ce;
 static zend_class_entry *php_io_operation_accept_ce;
 static zend_class_entry *php_io_operation_connect_ce;
 static zend_class_entry *php_io_operation_fsync_ce;
+static zend_class_entry *php_io_operation_waitpid_ce;
+static zend_class_entry *php_io_operation_sigwait_ce;
 static zend_class_entry *php_io_operation_getaddrinfo_ce;
 static zend_class_entry *php_io_operation_getnameinfo_ce;
 static zend_class_entry *php_io_completion_ce;
@@ -56,7 +59,7 @@ PHPAPI zend_object_handlers php_io_opqueue_handlers;
 
 typedef struct {
 	php_io_op *op;              /* NULL once the operation ended */
-	zend_object *timer_handle;  /* Timer operation: the TimerHandle of getHandle(), created on first call */
+	zend_object *lazy_handle;   /* the TimerHandle, ProcessHandle or SignalHandle of getHandle(), created on first call */
 	zend_object std;
 } php_io_operation_obj;
 
@@ -107,15 +110,15 @@ static zend_object *php_io_operation_create_object(zend_class_entry *ce)
 	zend_object_std_init(&intern->std, ce);
 	object_properties_init(&intern->std, ce);
 	intern->op = NULL;
-	intern->timer_handle = NULL;
+	intern->lazy_handle = NULL;
 	return &intern->std;
 }
 
 static void php_io_operation_free_object(zend_object *obj)
 {
 	php_io_operation_obj *intern = PHP_IO_OPERATION_FROM_ZOBJ(obj);
-	if (intern->timer_handle) {
-		OBJ_RELEASE(intern->timer_handle);
+	if (intern->lazy_handle) {
+		OBJ_RELEASE(intern->lazy_handle);
 	}
 	zend_object_std_dtor(&intern->std);
 }
@@ -133,6 +136,8 @@ static zend_class_entry *php_io_operation_ce_for(php_io_op_type type)
 		case PHP_IO_OP_ACCEPT: return php_io_operation_accept_ce;
 		case PHP_IO_OP_CONNECT: return php_io_operation_connect_ce;
 		case PHP_IO_OP_FSYNC: return php_io_operation_fsync_ce;
+		case PHP_IO_OP_WAITPID: return php_io_operation_waitpid_ce;
+		case PHP_IO_OP_SIGWAIT: return php_io_operation_sigwait_ce;
 		case PHP_IO_OP_GETADDRINFO: return php_io_operation_getaddrinfo_ce;
 		case PHP_IO_OP_GETNAMEINFO: return php_io_operation_getnameinfo_ce;
 		default: return php_io_operation_ce;
@@ -153,7 +158,18 @@ PHPAPI zend_object *php_io_operation_get_zobj(php_io_op *op)
 
 static void php_io_operation_detach(zend_object *zobj)
 {
-	PHP_IO_OPERATION_FROM_ZOBJ(zobj)->op = NULL;
+	php_io_operation_obj *intern = PHP_IO_OPERATION_FROM_ZOBJ(zobj);
+	php_io_op *op = intern->op;
+	intern->op = NULL;
+#ifndef PHP_WIN32
+	/* What a signal handle consumed for this wait goes back with the op */
+	if (op && op->type == PHP_IO_OP_SIGWAIT && op->u.sigwait.taken == 0) {
+		zend_object *handle = intern->lazy_handle ? intern->lazy_handle : op->handle;
+		if (handle) {
+			op->u.sigwait.taken = php_io_poll_signal_handle_take(handle, op->u.sigwait.set, op->u.sigwait.info);
+		}
+	}
+#endif
 }
 
 static php_io_op *php_io_operation_fetch(zval *zv)
@@ -244,23 +260,39 @@ PHP_METHOD(Io_Operation, getHandle)
 	if (!op) {
 		RETURN_THROWS();
 	}
-	if (op->type == PHP_IO_OP_TIMER) {
-		/* A TimerHandle for the remaining time, so a provider on a Context
-		 * can watch it like any other handle */
-		php_io_operation_obj *intern = PHP_IO_OPERATION_FROM_ZOBJ(Z_OBJ_P(ZEND_THIS));
-		if (!intern->timer_handle) {
-			zval handle_zv;
-			zend_hrtime_t remaining = php_deadline_is_infinite(&op->deadline)
-					? ZEND_HRTIME_T_MAX / 2 : php_io_deadline_remaining(&op->deadline, zend_hrtime());
-			php_io_poll_timer_handle_create(&handle_zv, remaining, false);
-			intern->timer_handle = Z_OBJ(handle_zv);
+	if (op->handle) {
+		RETURN_OBJ_COPY(op->handle);
+	}
+
+	/* The generic handles are created on demand, so a provider on a
+	 * Context can watch the op like any other handle */
+	php_io_operation_obj *intern = PHP_IO_OPERATION_FROM_ZOBJ(Z_OBJ_P(ZEND_THIS));
+	if (!intern->lazy_handle) {
+		zval handle_zv;
+		switch (op->type) {
+			case PHP_IO_OP_TIMER: {
+				zend_hrtime_t remaining = php_deadline_is_infinite(&op->deadline)
+						? ZEND_HRTIME_T_MAX / 2 : php_io_deadline_remaining(&op->deadline, zend_hrtime());
+				php_io_poll_timer_handle_create(&handle_zv, remaining, false);
+				break;
+			}
+#ifndef PHP_WIN32
+			case PHP_IO_OP_WAITPID:
+				if (op->u.waitpid.pid <= 0) {
+					RETURN_NULL();
+				}
+				php_io_poll_process_handle_create(&handle_zv, op->u.waitpid.pid);
+				break;
+			case PHP_IO_OP_SIGWAIT:
+				php_io_poll_signal_handle_create(&handle_zv, op->u.sigwait.set);
+				break;
+#endif
+			default:
+				RETURN_NULL();
 		}
-		RETURN_OBJ_COPY(intern->timer_handle);
+		intern->lazy_handle = Z_OBJ(handle_zv);
 	}
-	if (!op->handle) {
-		RETURN_NULL();
-	}
-	RETURN_OBJ_COPY(op->handle);
+	RETURN_OBJ_COPY(intern->lazy_handle);
 }
 
 PHP_METHOD(Io_Operation, getEvents)
@@ -387,6 +419,25 @@ PHP_METHOD(Io_Operation_Recv, getFlags) PHP_IO_DATA_GETTER(Recv, PHP_IO_OP_RECV,
 PHP_METHOD(Io_Operation_Send, getLength) PHP_IO_DATA_GETTER(Send, PHP_IO_OP_SEND, RETURN_LONG((zend_long) op->u.io.len))
 PHP_METHOD(Io_Operation_Send, getFlags) PHP_IO_DATA_GETTER(Send, PHP_IO_OP_SEND, RETURN_LONG(op->u.io.flags))
 PHP_METHOD(Io_Operation_Fsync, isDataOnly) PHP_IO_DATA_GETTER(Fsync, PHP_IO_OP_FSYNC, RETURN_BOOL(op->u.fsync.data_only))
+PHP_METHOD(Io_Operation_WaitPid, getPid) PHP_IO_DATA_GETTER(WaitPid, PHP_IO_OP_WAITPID, RETURN_LONG((zend_long) op->u.waitpid.pid))
+
+PHP_METHOD(Io_Operation_SigWait, getSignals)
+{
+	ZEND_PARSE_PARAMETERS_NONE();
+
+	php_io_op *op = php_io_operation_fetch_type(ZEND_THIS, PHP_IO_OP_SIGWAIT);
+	if (!op) {
+		RETURN_THROWS();
+	}
+	array_init(return_value);
+#ifndef PHP_WIN32
+	for (int signo = 1; signo < NSIG; signo++) {
+		if (sigismember(op->u.sigwait.set, signo) == 1) {
+			add_next_index_long(return_value, signo);
+		}
+	}
+#endif
+}
 
 PHP_METHOD(Io_Operation_Connect, getAddress)
 {
@@ -1286,6 +1337,8 @@ PHP_MINIT_FUNCTION(io_hooks)
 	PHP_IO_REGISTER_DATA_OP(php_io_operation_fsync_ce, Fsync);
 	PHP_IO_REGISTER_DATA_OP(php_io_operation_getaddrinfo_ce, GetAddrInfo);
 	PHP_IO_REGISTER_DATA_OP(php_io_operation_getnameinfo_ce, GetNameInfo);
+	PHP_IO_REGISTER_DATA_OP(php_io_operation_waitpid_ce, WaitPid);
+	PHP_IO_REGISTER_DATA_OP(php_io_operation_sigwait_ce, SigWait);
 #undef PHP_IO_REGISTER_DATA_OP
 
 	php_io_completion_ce = register_class_Io_Completion();

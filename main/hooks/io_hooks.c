@@ -19,6 +19,20 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <time.h>
+#ifndef PHP_WIN32
+# include <sys/wait.h>
+# include <signal.h>
+# include <fcntl.h>
+#endif
+#ifdef __linux__
+# include <sys/syscall.h>
+#endif
+#ifdef HAVE_SYS_SIGNALFD_H
+# include <sys/signalfd.h>
+#endif
+#ifdef HAVE_SYS_PIDFD_H
+# include <sys/pidfd.h>
+#endif
 
 PHPAPI void (*php_io_op_zobj_detach)(zend_object *zobj) = NULL;
 
@@ -44,6 +58,22 @@ PHPAPI void php_io_op_poll(php_io_op *op, zend_object *handle, php_socket_t fd, 
 PHPAPI void php_io_op_timer(php_io_op *op, php_deadline dl)
 {
 	php_io_op_init(op, PHP_IO_OP_TIMER, NULL, SOCK_ERR, PHP_POLL_TIMER, dl);
+}
+
+PHPAPI void php_io_op_waitpid(php_io_op *op, zend_object *handle, pid_t pid, int options, int *status, php_deadline dl)
+{
+	php_io_op_init(op, PHP_IO_OP_WAITPID, handle, SOCK_ERR, PHP_POLL_PROCESS, dl);
+	op->u.waitpid.pid = pid;
+	op->u.waitpid.options = options;
+	op->u.waitpid.status = status;
+}
+
+PHPAPI void php_io_op_sigwait(php_io_op *op, zend_object *handle, const php_sigset_t *set, php_siginfo_t *info, php_deadline dl)
+{
+	php_io_op_init(op, PHP_IO_OP_SIGWAIT, handle, SOCK_ERR, PHP_POLL_SIGNAL, dl);
+	op->u.sigwait.set = set;
+	op->u.sigwait.info = info;
+	op->u.sigwait.taken = 0;
 }
 
 PHPAPI void php_io_op_read(php_io_op *op, zend_object *handle, php_socket_t fd, void *buf, size_t len, int64_t off, php_deadline dl)
@@ -299,6 +329,49 @@ PHPAPI void php_io_hooks_request_shutdown(void)
 		efree(FG(io_orphans));
 		FG(io_orphans) = NULL;
 	}
+	if (FG(io_reaped)) {
+		zend_hash_destroy(FG(io_reaped));
+		efree(FG(io_reaped));
+		FG(io_reaped) = NULL;
+	}
+}
+
+PHPAPI void php_io_child_reaped(pid_t pid, int status)
+{
+	if (!FG(io_reaped)) {
+		FG(io_reaped) = emalloc(sizeof(HashTable));
+		zend_hash_init(FG(io_reaped), 4, NULL, NULL, 0);
+	}
+	zval zv;
+	ZVAL_LONG(&zv, status);
+	zend_hash_index_update(FG(io_reaped), (zend_ulong) pid, &zv);
+}
+
+/* pid -1 takes any recorded child, as waitpid(-1) would */
+PHPAPI bool php_io_child_take_reaped(pid_t *pid, int *status)
+{
+	if (!FG(io_reaped) || zend_hash_num_elements(FG(io_reaped)) == 0) {
+		return false;
+	}
+	zval *zv = NULL;
+	zend_ulong key = 0;
+	if (*pid > 0) {
+		key = (zend_ulong) *pid;
+		zv = zend_hash_index_find(FG(io_reaped), key);
+	} else if (*pid == -1) {
+		zval *first;
+		ZEND_HASH_FOREACH_NUM_KEY_VAL(FG(io_reaped), key, first) {
+			zv = first;
+			break;
+		} ZEND_HASH_FOREACH_END();
+	}
+	if (!zv) {
+		return false;
+	}
+	*pid = (pid_t) key;
+	*status = (int) Z_LVAL_P(zv);
+	zend_hash_index_del(FG(io_reaped), key);
+	return true;
 }
 
 PHPAPI uint32_t php_io_ops_in_flight(void)
@@ -987,6 +1060,166 @@ PHPAPI int php_io_getnameinfo(const struct sockaddr *addr, socklen_t addrlen, in
 	}
 	return getnameinfo(addr, addrlen, host, hostlen, service, servicelen, flags);
 }
+
+#ifndef PHP_WIN32
+static int php_io_pidfd_open(pid_t pid)
+{
+#if defined(HAVE_PIDFD_OPEN)
+	return pidfd_open(pid, 0);
+#elif defined(__linux__) && defined(SYS_pidfd_open)
+	return (int) syscall(SYS_pidfd_open, pid, 0);
+#else
+	errno = ENOSYS;
+	return -1;
+#endif
+}
+
+/* The wait is the provider's; after Ready the core takes what a handle
+ * recorded or asks the kernel without waiting, and waits again when
+ * nothing changed yet */
+PHPAPI pid_t php_io_waitpid(zend_object *handle, pid_t pid, int *status, int options, php_deadline *dl)
+{
+	int recorded;
+	pid_t which = pid;
+	if (php_io_child_take_reaped(&which, &recorded)) {
+		if (status) {
+			*status = recorded;
+		}
+		return which;
+	}
+
+	if (FG(io_hooks) && !(options & WNOHANG)) {
+		php_io_op op;
+		php_io_op_result result;
+		pid_t ret;
+		int pidfd = -1;
+		int watchable = 0;
+#ifdef WUNTRACED
+		watchable |= WUNTRACED;
+#endif
+#ifdef WCONTINUED
+		watchable |= WCONTINUED;
+#endif
+		if (pid > 0 && !(options & watchable)) {
+			pidfd = php_io_pidfd_open(pid);
+			if (pidfd >= 0) {
+				fcntl(pidfd, F_SETFD, FD_CLOEXEC);
+			}
+		}
+
+		for (;;) {
+			php_io_op_waitpid(&op, handle, pid, options, status, *dl);
+			if (pidfd >= 0) {
+				op.fd = pidfd;
+			}
+			if (php_io_run(&op, &result) == FAILURE) {
+				errno = ECANCELED;
+				ret = -1;
+				break;
+			}
+			if (result.status == PHP_IO_READY) {
+				which = pid;
+				if (php_io_child_take_reaped(&which, &recorded)) {
+					if (status) {
+						*status = recorded;
+					}
+					ret = which;
+					break;
+				}
+				ret = waitpid(pid, status, options | WNOHANG);
+				if (ret != 0) {
+					break;
+				}
+				continue;
+			}
+			if (result.status == PHP_IO_UNSUPPORTED) {
+				ret = waitpid(pid, status, options);
+				break;
+			}
+			ssize_t r;
+			php_io_data_result(&result, &r);
+			ret = (pid_t) r;
+			break;
+		}
+		if (pidfd >= 0) {
+			close(pidfd);
+		}
+		return ret;
+	}
+
+	return waitpid(pid, status, options);
+}
+
+PHPAPI int php_io_sigwait(zend_object *handle, const php_sigset_t *set, php_siginfo_t *info, php_deadline *dl)
+{
+	if (FG(io_hooks)) {
+		php_io_op op;
+		php_io_op_result result;
+		int ret;
+		int sfd = -1;
+#ifdef HAVE_SYS_SIGNALFD_H
+		sfd = signalfd(-1, set, SFD_NONBLOCK | SFD_CLOEXEC);
+#endif
+
+		for (;;) {
+			php_io_op_sigwait(&op, handle, set, info, *dl);
+			if (sfd >= 0) {
+				op.fd = sfd;
+			}
+			if (php_io_run(&op, &result) == FAILURE) {
+				errno = ECANCELED;
+				ret = -1;
+				break;
+			}
+			if (result.status == PHP_IO_DONE && result.error == EAGAIN) {
+				/* Another wait collected the signal first */
+				continue;
+			}
+			if (result.status == PHP_IO_READY) {
+				if (op.u.sigwait.taken > 0) {
+					ret = op.u.sigwait.taken;
+					break;
+				}
+				struct timespec zero = { 0, 0 };
+				ret = sigtimedwait(set, info, &zero);
+				if (ret > 0 || (errno != EAGAIN && errno != EINTR)) {
+					break;
+				}
+				continue;
+			}
+			if (result.status == PHP_IO_UNSUPPORTED) {
+				ret = -2;
+				break;
+			}
+			if (result.status == PHP_IO_TIMEOUT) {
+				errno = EAGAIN;
+				ret = -1;
+				break;
+			}
+			ssize_t r;
+			php_io_data_result(&result, &r);
+			ret = (int) r;
+			break;
+		}
+		if (sfd >= 0) {
+			close(sfd);
+		}
+		if (ret != -2) {
+			return ret;
+		}
+	}
+
+	if (php_deadline_is_infinite(dl)) {
+		return sigwaitinfo(set, info);
+	}
+	zend_hrtime_t remaining = php_io_deadline_remaining(dl, zend_hrtime());
+	struct timespec ts = {
+		.tv_sec = remaining / ZEND_NANO_IN_SEC,
+		.tv_nsec = remaining % ZEND_NANO_IN_SEC,
+	};
+	return sigtimedwait(set, info, &ts);
+}
+#endif
 
 PHPAPI zend_result php_io_sleep(php_deadline dl)
 {

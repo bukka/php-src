@@ -1,8 +1,8 @@
 /* This is a generated file, edit io_hooks.stub.php instead.
- * Stub hash: 017285c42f4a672145ede1a3a5f18b5ec1526b82 */
+ * Stub hash: afd88e912f147555020c980a2e7ca6c482f22a2e */
 
-#ifndef ZEND_IO_HOOKS_DECL_017285c42f4a672145ede1a3a5f18b5ec1526b82_H
-#define ZEND_IO_HOOKS_DECL_017285c42f4a672145ede1a3a5f18b5ec1526b82_H
+#ifndef ZEND_IO_HOOKS_DECL_afd88e912f147555020c980a2e7ca6c482f22a2e_H
+#define ZEND_IO_HOOKS_DECL_afd88e912f147555020c980a2e7ca6c482f22a2e_H
 
 typedef enum zend_enum_Io_CompletionStatus {
 	ZEND_ENUM_Io_CompletionStatus_Done = 1,
@@ -18,4 +18,4 @@ typedef enum zend_enum_Io_Hooks_Capability {
 	ZEND_ENUM_Io_Hooks_Capability_Direct = 2,
 } zend_enum_Io_Hooks_Capability;
 
-#endif /* ZEND_IO_HOOKS_DECL_017285c42f4a672145ede1a3a5f18b5ec1526b82_H */
+#endif /* ZEND_IO_HOOKS_DECL_afd88e912f147555020c980a2e7ca6c482f22a2e_H */

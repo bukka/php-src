@@ -389,10 +389,12 @@ PHP_FUNCTION(pcntl_waitpid)
 		memset(&rusage, 0, sizeof(struct rusage));
 		child_id = wait4((pid_t) pid, &status, options, &rusage);
 	} else {
-		child_id = waitpid((pid_t) pid, &status, options);
+		php_deadline dl = php_io_deadline_infinite();
+		child_id = php_io_waitpid(NULL, (pid_t) pid, &status, options, &dl);
 	}
 #else
-	child_id = waitpid((pid_t) pid, &status, options);
+	php_deadline dl = php_io_deadline_infinite();
+	child_id = php_io_waitpid(NULL, (pid_t) pid, &status, options, &dl);
 #endif
 
 	if (child_id < 0) {
@@ -502,13 +504,13 @@ PHP_FUNCTION(pcntl_wait)
 
 		memset(&rusage, 0, sizeof(struct rusage));
 		child_id = wait3(&status, options, &rusage);
-	} else if (options) {
-		child_id = wait3(&status, options, NULL);
 	} else {
-		child_id = wait(&status);
+		php_deadline dl = php_io_deadline_infinite();
+		child_id = php_io_waitpid(NULL, -1, &status, options, &dl);
 	}
 #else
-	child_id = wait(&status);
+	php_deadline dl = php_io_deadline_infinite();
+	child_id = php_io_waitpid(NULL, -1, &status, options, &dl);
 #endif
 	if (child_id < 0) {
 		PCNTL_G(last_error) = errno;
@@ -1034,7 +1036,8 @@ PHP_FUNCTION(pcntl_sigwaitinfo)
 
 	errno = 0;
 	siginfo_t siginfo;
-	int signal_no = sigwaitinfo(&set, &siginfo);
+	php_deadline dl = php_io_deadline_infinite();
+	int signal_no = php_io_sigwait(NULL, &set, &siginfo, &dl);
 	/* sigwaitinfo() never sets errno to EAGAIN according to POSIX */
 	if (signal_no == -1) {
 		PCNTL_G(last_error) = errno;
@@ -1094,10 +1097,8 @@ PHP_FUNCTION(pcntl_sigtimedwait)
 
 	errno = 0;
 	siginfo_t siginfo;
-	struct timespec timeout;
-	timeout.tv_sec  = (time_t) tv_sec;
-	timeout.tv_nsec = tv_nsec;
-	int signal_no = sigtimedwait(&set, &siginfo, &timeout);
+	php_deadline dl = php_io_deadline_from_ns((zend_hrtime_t) tv_sec * ZEND_NANO_IN_SEC + tv_nsec);
+	int signal_no = php_io_sigwait(NULL, &set, &siginfo, &dl);
 	if (signal_no == -1) {
 		if (errno != EAGAIN) {
 			PCNTL_G(last_error) = errno;

@@ -18,6 +18,7 @@
 #include <ior/ior.h>
 #include <errno.h>
 #include <netdb.h>
+#include <unistd.h>
 
 /* One submitted op. The main submission and its linked timeout each
  * produce a cqe, and the record lives until both were reaped, however the
@@ -51,6 +52,7 @@ struct php_io_ring {
 	ior_ctx *ctx;
 	uint32_t features;
 	bool fd_nonblock;
+	pid_t owner_pid;                /* a child inherits the ring but must not touch it */
 	php_io_ring_req *live;          /* every record with a cqe outstanding or a completion to deliver */
 	uint32_t pending;               /* submitted ops not yet delivered, orphans included */
 	php_io_ring_req **ready;
@@ -97,6 +99,13 @@ static void php_io_ring_list_remove(php_io_ring_req **list, uint32_t *n, php_io_
 	ZEND_UNREACHABLE();
 }
 
+/* Inherited across fork: the kernel ring is shared with the parent and the
+ * worker threads do not exist here, so it is left alone and leaked */
+static zend_always_inline bool php_io_ring_foreign(php_io_ring *ring)
+{
+	return ring->owner_pid != getpid();
+}
+
 PHPAPI php_io_ring *php_io_ring_create(uint32_t entries, bool fd_nonblock)
 {
 	ior_params params;
@@ -116,6 +125,7 @@ PHPAPI php_io_ring *php_io_ring_create(uint32_t entries, bool fd_nonblock)
 	php_io_ring *ring = ecalloc(1, sizeof(*ring));
 	ring->ctx = ctx;
 	ring->features = params.features;
+	ring->owner_pid = getpid();
 	ring->fd_nonblock = fd_nonblock;
 	ring->cqes_cap = 64;
 	ring->cqes = safe_emalloc(ring->cqes_cap, sizeof(*ring->cqes), 0);
@@ -367,8 +377,23 @@ static zend_result php_io_ring_submit_one(php_io_ring *ring, php_io_ring_req *re
 				return FAILURE;
 			}
 			break;
+		case PHP_IO_OP_WAITPID:
+			if (ior_prep_waitpid(ctx, sqe, (ior_pid_t) op->u.waitpid.pid, op->u.waitpid.status, op->u.waitpid.options) < 0) {
+				errno = ENOTSUP;
+				return FAILURE;
+			}
+			op->in_flight = true;
+			break;
+		case PHP_IO_OP_SIGWAIT: {
+			int rc = ior_prep_sigwait(ctx, sqe, op->u.sigwait.set, op->u.sigwait.info);
+			if (rc < 0) {
+				errno = -rc;
+				return FAILURE;
+			}
+			op->in_flight = true;
+			break;
+		}
 		default:
-			/* WAITPID and SIGWAIT wait for their step */
 			errno = ENOTSUP;
 			return FAILURE;
 	}
@@ -414,6 +439,10 @@ static void php_io_ring_submit_cancel(php_io_ring *ring, php_io_ring_req *req)
 
 PHPAPI zend_result php_io_ring_submit_op(php_io_ring *ring, php_io_op *op, void *data)
 {
+	if (php_io_ring_foreign(ring)) {
+		errno = EPERM;
+		return FAILURE;
+	}
 	if (op->queue_data) {
 		errno = EALREADY;
 		return FAILURE;
@@ -780,6 +809,10 @@ static uint32_t php_io_ring_deliver(php_io_ring *ring, php_io_queue_completion *
 
 PHPAPI int php_io_ring_wait(php_io_ring *ring, php_io_queue_completion *out, uint32_t max, const struct timespec *timeout)
 {
+	if (php_io_ring_foreign(ring)) {
+		errno = EPERM;
+		return -1;
+	}
 	zend_hrtime_t limit = ZEND_HRTIME_T_MAX;
 
 	if (max == 0) {
@@ -837,6 +870,26 @@ PHPAPI int php_io_ring_wait(php_io_ring *ring, php_io_queue_completion *out, uin
 
 PHPAPI void php_io_ring_destroy(php_io_ring *ring)
 {
+	if (php_io_ring_foreign(ring)) {
+		while (ring->live) {
+			php_io_ring_req *req = ring->live;
+			req->orphaned = false;
+			if (req->ready) {
+				php_io_ring_list_remove(ring->ready, &ring->n_ready, req);
+			}
+			php_io_ring_req_free(ring, req);
+		}
+		if (ring->ready) {
+			efree(ring->ready);
+		}
+		if (ring->fired) {
+			efree(ring->fired);
+		}
+		efree(ring->cqes);
+		efree(ring);
+		return;
+	}
+
 	/* Cancel everything in flight and drain until each has completed */
 	for (php_io_ring_req *req = ring->live; req; req = req->next) {
 		php_io_ring_req_cancel(ring, req);

@@ -37,6 +37,8 @@
 #define PHP_POLL_PRI     0x80 /* Priority data, backend dependent */
 #define PHP_POLL_TIMER   0x100 /* A timer of the context fired */
 #define PHP_POLL_NOTIFY  0x200 /* A notification handle is raised */
+#define PHP_POLL_SIGNAL  0x400 /* A signal handle delivered */
+#define PHP_POLL_PROCESS 0x800 /* A process handle: the child exited */
 
 /* Poll flags */
 #define PHP_POLL_FLAG_PERSISTENT 0x01
@@ -100,6 +102,10 @@ typedef struct php_poll_event php_poll_event;
 PHPAPI bool php_poll_is_backend_available(php_poll_backend_type backend);
 PHPAPI bool php_poll_backend_supports_edge_triggering(php_poll_backend_type backend);
 PHPAPI bool php_poll_backend_supports_priority(php_poll_backend_type backend);
+/* Whether ProcessHandle and SignalHandle have a source: a pidfd or signalfd
+ * on Linux, EVFILT_PROC and EVFILT_SIGNAL on kqueue */
+PHPAPI bool php_poll_backend_supports_process_handles(php_poll_backend_type backend);
+PHPAPI bool php_poll_backend_supports_signal_handles(php_poll_backend_type backend);
 
 PHPAPI php_poll_ctx *php_poll_create(php_poll_backend_type preferred_backend, uint32_t flags);
 PHPAPI php_poll_ctx *php_poll_create_by_name(const char *preferred_backend, uint32_t flags);
@@ -166,6 +172,20 @@ struct php_poll_handle_ops {
 	 * Cleanup handle-specific data
 	 */
 	void (*cleanup)(php_poll_handle_object *handle);
+
+	/**
+	 * A handle standing for something other than descriptor readiness: the
+	 * one PHP_POLL_* event it reports (NOTIFY, SIGNAL or PROCESS), watched
+	 * as READ on its descriptor. Zero for descriptor handles.
+	 */
+	uint32_t event;
+
+	/**
+	 * Called when the descriptor of such a handle was reported readable,
+	 * before the event is delivered, to consume the source and record what
+	 * it found. May be NULL.
+	 */
+	void (*fired)(php_poll_handle_object *handle);
 };
 
 /* Base poll handle object structure */

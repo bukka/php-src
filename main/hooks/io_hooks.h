@@ -61,6 +61,14 @@ typedef struct _php_io_op_result {
 typedef struct _php_io_op php_io_op;
 typedef struct _php_io_queue php_io_queue;
 
+#ifdef PHP_WIN32
+typedef struct { uint32_t bits; } php_sigset_t;
+typedef struct { int si_signo; int si_code; } php_siginfo_t;
+#else
+typedef sigset_t php_sigset_t;
+typedef siginfo_t php_siginfo_t;
+#endif
+
 struct _php_io_op {
 	php_io_op_type type;
 	uint32_t flags;             /* PHP_IO_OP_F_* */
@@ -78,6 +86,9 @@ struct _php_io_op {
 		struct { const struct sockaddr *addr; socklen_t addrlen; int flags;
 		         char *host; size_t hostlen; char *service; size_t servicelen; } getnameinfo;
 		struct { bool data_only; } fsync;
+		struct { pid_t pid; int options; int *status; } waitpid;       /* fd is the pidfd where available */
+		struct { const php_sigset_t *set; php_siginfo_t *info;
+		         int taken; } sigwait;                                  /* taken: a signal a handle recorded, fd a signalfd */
 		struct { php_io_op **ops; uint32_t n;                          /* members, caller owned */
 		         php_io_op_result *results; uint32_t n_results; } any;  /* filled on completion */
 	} u;
@@ -100,6 +111,8 @@ PHPAPI void php_io_op_connect(php_io_op *op, zend_object *handle, php_socket_t f
 PHPAPI void php_io_op_getaddrinfo(php_io_op *op, const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res, php_deadline dl);
 PHPAPI void php_io_op_getnameinfo(php_io_op *op, const struct sockaddr *addr, socklen_t addrlen, int flags, char *host, size_t hostlen, char *service, size_t servicelen, php_deadline dl);
 PHPAPI void php_io_op_fsync(php_io_op *op, zend_object *handle, php_socket_t fd, bool data_only);
+PHPAPI void php_io_op_waitpid(php_io_op *op, zend_object *handle, pid_t pid, int options, int *status, php_deadline dl);
+PHPAPI void php_io_op_sigwait(php_io_op *op, zend_object *handle, const php_sigset_t *set, php_siginfo_t *info, php_deadline dl);
 PHPAPI void php_io_op_any(php_io_op *op, php_io_op **members, uint32_t n, php_io_op_result *results);
 
 /* Persistent Poll ops: owned by the core, kept on the handle, the same
@@ -169,9 +182,17 @@ PHPAPI int php_io_fsync(php_stream *stream, int fd, bool data_only);
 PHPAPI int php_io_getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res, php_deadline *dl);
 PHPAPI int php_io_getnameinfo(const struct sockaddr *addr, socklen_t addrlen, int flags, char *host, size_t hostlen, char *service, size_t servicelen, php_deadline *dl);
 PHPAPI zend_result php_io_sleep(php_deadline dl);
+/* Like waitpid(2) and sigtimedwait(2); a timed out signal wait fails with EAGAIN */
+PHPAPI pid_t php_io_waitpid(zend_object *handle, pid_t pid, int *status, int options, php_deadline *dl);
+PHPAPI int php_io_sigwait(zend_object *handle, const php_sigset_t *set, php_siginfo_t *info, php_deadline *dl);
 
 /* Active php_io_run() frames; pcntl_fork() refuses while any is in flight */
 PHPAPI uint32_t php_io_ops_in_flight(void);
+
+/* A child reaped through a handle: its status is handed to the next wait
+ * for it, so proc_close() and pcntl_waitpid() do not fail with ECHILD */
+PHPAPI void php_io_child_reaped(pid_t pid, int status);
+PHPAPI bool php_io_child_take_reaped(pid_t *pid, int *status);   /* -1 takes any, the pid comes back */
 
 /* Orphans: a queue that keeps an in-flight op after its frame went away
  * registers the stream here and unfreezes it when the op settled. A stream

@@ -86,6 +86,10 @@ struct php_poll_ctx {
 	/* Backend-specific data */
 	void *backend_data;
 
+	/* The process that created it: a child inherits a context it must not
+	 * touch, since the backend instance is shared with the parent */
+	pid_t owner_pid;
+
 	/* Deadline heap of the armed timers */
 	php_poll_timer **timers;
 	uint32_t timer_count;

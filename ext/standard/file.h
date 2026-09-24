@@ -107,6 +107,7 @@ typedef struct {
 	struct _php_io_persistent_op *io_persistent_ops; /* every persistent op of the request */
 	uint32_t io_ops_in_flight;            /* active php_io_run() frames */
 	HashTable *io_orphans;                /* stream pointer key -> php_io_queue, ops kept by a queue past their frame */
+	HashTable *io_reaped;                 /* pid -> wait status of children reaped through a ProcessHandle */
 #ifdef HAVE_GETHOSTBYNAME_R
 	struct hostent tmp_host_info;
 	char *tmp_host_buf;

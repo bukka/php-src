@@ -277,6 +277,10 @@ static void php_io_poll_req_arm(php_io_poll_queue *q, php_io_poll_req *req)
 	}
 
 	uint32_t events = op->type == PHP_IO_OP_POLL ? op->u.poll.events : op->ready_events;
+	if (events & (PHP_POLL_PROCESS | PHP_POLL_SIGNAL)) {
+		/* A pidfd or signalfd, readable when there is something to take */
+		events = PHP_POLL_READ;
+	}
 	events &= PHP_POLL_READ | PHP_POLL_WRITE | PHP_POLL_ERROR | PHP_POLL_HUP | PHP_POLL_RDHUP | PHP_POLL_PRI;
 	if (op->fd == SOCK_ERR || events == 0) {
 		php_io_poll_req_complete(q, req, PHP_IO_UNSUPPORTED, 0, 0);
