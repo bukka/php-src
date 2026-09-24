@@ -13,7 +13,10 @@ final class Tracing extends Scheduler
     {
         $this->seen[$op::class] = true;
         if ($op instanceof \Io\Operation\Read || $op instanceof \Io\Operation\Write) {
-            if ($op->getLength() <= 0 || $op->getOffset() !== -1) {
+            /* -1 is the current position; a Windows overlapped file keeps none, so the
+             * wrapper passes the offset it tracks */
+            $offsetOk = PHP_OS_FAMILY === 'Windows' ? $op->getOffset() >= 0 : $op->getOffset() === -1;
+            if ($op->getLength() <= 0 || !$offsetOk) {
                 $this->problems[] = $op::class;
             }
         } elseif ($op instanceof \Io\Operation\Fsync) {

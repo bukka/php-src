@@ -174,6 +174,11 @@ PHPAPI ssize_t php_io_recv(php_stream *stream, php_socket_t fd, void *buf, size_
 PHPAPI ssize_t php_io_send(php_stream *stream, php_socket_t fd, const void *buf, size_t len, int flags, php_deadline *dl);
 PHPAPI ssize_t php_io_read(php_stream *stream, int fd, void *buf, size_t len, php_deadline *dl);
 PHPAPI ssize_t php_io_write(php_stream *stream, int fd, const void *buf, size_t len, php_deadline *dl);
+/* The same at an explicit offset (pread and pwrite), for a descriptor the
+ * kernel keeps no position for: a Windows overlapped file. -1 is the
+ * current position, which is php_io_read() and php_io_write(). */
+PHPAPI ssize_t php_io_read_at(php_stream *stream, int fd, void *buf, size_t len, int64_t offset, php_deadline *dl);
+PHPAPI ssize_t php_io_write_at(php_stream *stream, int fd, const void *buf, size_t len, int64_t offset, php_deadline *dl);
 PHPAPI php_socket_t php_io_accept(php_stream *stream, php_socket_t fd, struct sockaddr *addr, socklen_t *addrlen, php_deadline *dl);
 PHPAPI int php_io_connect(php_stream *stream, php_socket_t fd, const struct sockaddr *addr, socklen_t addrlen, php_deadline *dl);
 /* Datagram sends and receives have no data op: the syscall first and a

@@ -143,7 +143,11 @@ typedef struct {
 	unsigned is_pipe_blocking:1; /* allow blocking read() on pipes, currently Windows only */
 	unsigned no_forced_fstat:1;  /* Use fstat cache even if forced */
 	unsigned is_seekable:1;		/* don't try and seek, if not set */
-	unsigned _reserved:26;
+	unsigned is_overlapped:1;	/* Windows: opened FILE_FLAG_OVERLAPPED, read and written at 'position' */
+	unsigned _reserved:25;
+#ifdef PHP_WIN32
+	zend_off_t position;	/* the offset the next read or write of an overlapped file uses */
+#endif
 
 	int lock_flag;			/* stores the lock state */
 	zend_string *temp_name;	/* if non-null, this is the path to a temporary file that
@@ -461,7 +465,16 @@ static ssize_t php_stdiop_write(php_stream *stream, const char *buf, size_t coun
 
 	if (data->fd >= 0) {
 #ifdef PHP_WIN32
-		bytes_written = _write(data->fd, buf, PLAIN_WRAP_BUF_SIZE(count));
+		if (data->is_overlapped) {
+			php_deadline deadline;
+			php_deadline_init_infinite(&deadline);
+			bytes_written = php_io_write_at(stream, data->fd, buf, PLAIN_WRAP_BUF_SIZE(count), data->position, &deadline);
+			if (bytes_written > 0) {
+				data->position += bytes_written;
+			}
+		} else {
+			bytes_written = _write(data->fd, buf, PLAIN_WRAP_BUF_SIZE(count));
+		}
 #else
 		php_deadline deadline;
 		php_deadline_init_infinite(&deadline);
@@ -539,13 +552,22 @@ static ssize_t php_stdiop_read(php_stream *stream, char *buf, size_t count)
 		}
 #endif
 #ifdef PHP_WIN32
-		ret = read(data->fd, buf,  PLAIN_WRAP_BUF_SIZE(count));
-
-		if (ret == (size_t)-1 && errno == EINTR) {
-			/* Read was interrupted, retry once,
-			   If read still fails, give up with feof==0
-			   so script can retry if desired */
+		if (data->is_overlapped) {
+			php_deadline deadline;
+			php_deadline_init_infinite(&deadline);
+			ret = php_io_read_at(stream, data->fd, buf, PLAIN_WRAP_BUF_SIZE(count), data->position, &deadline);
+			if (ret > 0) {
+				data->position += ret;
+			}
+		} else {
 			ret = read(data->fd, buf,  PLAIN_WRAP_BUF_SIZE(count));
+
+			if (ret == (size_t)-1 && errno == EINTR) {
+				/* Read was interrupted, retry once,
+				   If read still fails, give up with feof==0
+				   so script can retry if desired */
+				ret = read(data->fd, buf,  PLAIN_WRAP_BUF_SIZE(count));
+			}
 		}
 #else
 		php_deadline deadline;
@@ -705,6 +727,12 @@ static int php_stdiop_sync(php_stream *stream, bool dataonly)
 	FILE *fp;
 	int fd;
 
+#ifdef PHP_WIN32
+	if (data->is_overlapped) {
+		/* No FILE* over an overlapped descriptor: sync the descriptor itself */
+		return php_stdiop_flush(stream) == 0 ? php_io_fsync(stream, data->fd, dataonly) : -1;
+	}
+#endif
 	if (php_stream_cast(stream, PHP_STREAM_AS_STDIO, (void**)&fp, REPORT_ERRORS) == FAILURE) {
 		return -1;
 	}
@@ -732,10 +760,22 @@ static int php_stdiop_seek(php_stream *stream, zend_off_t offset, int whence, ze
 	if (data->fd >= 0) {
 		zend_off_t result;
 
+#ifdef PHP_WIN32
+		if (data->is_overlapped && whence == SEEK_CUR) {
+			/* The kernel keeps no position for an overlapped handle */
+			offset += data->position;
+			whence = SEEK_SET;
+		}
+#endif
 		result = zend_lseek(data->fd, offset, whence);
 		if (result == (zend_off_t)-1)
 			return -1;
 
+#ifdef PHP_WIN32
+		if (data->is_overlapped) {
+			data->position = result;
+		}
+#endif
 		*newoffset = result;
 		return 0;
 
@@ -758,6 +798,12 @@ static int php_stdiop_cast(php_stream *stream, int castas, void **ret)
 
 	switch (castas)	{
 		case PHP_STREAM_AS_STDIO:
+#ifdef PHP_WIN32
+			if (data->is_overlapped) {
+				/* The CRT's FILE* reads and writes cannot drive an overlapped handle */
+				return FAILURE;
+			}
+#endif
 			if (ret) {
 
 				if (data->file == NULL) {
@@ -804,6 +850,12 @@ static int php_stdiop_cast(php_stream *stream, int castas, void **ret)
 			if (data->file) {
 				return FAILURE;
 			}
+#ifdef PHP_WIN32
+			if (data->is_overlapped) {
+				/* The copy helper reads and writes the CRT way */
+				return FAILURE;
+			}
+#endif
 			PHP_STDIOP_GET_FD(fd, data);
 			if (SOCK_ERR == fd) {
 				return FAILURE;
@@ -1310,7 +1362,20 @@ PHPAPI php_stream *_php_stream_fopen(const char *filename, const char *mode, zen
 		}
 	}
 #ifdef PHP_WIN32
-	fd = php_win32_ioutil_open(realpath, open_flags, 0666);
+	/* While hooks are installed a file is opened overlapped, so that a
+	 * completion provider can perform its reads and writes (IOCP completes
+	 * nothing on a synchronous handle). Append mode keeps the CRT path: an
+	 * overlapped write has no current position to append at. A device that
+	 * refuses the flag is opened the usual way. */
+	bool overlapped = FG(io_hooks) != NULL && !(open_flags & O_APPEND);
+	fd = -1;
+	if (overlapped) {
+		fd = php_win32_ioutil_open(realpath, open_flags | PHP_WIN32_IOUTIL_O_OVERLAPPED, 0666);
+		overlapped = fd != -1;
+	}
+	if (fd == -1) {
+		fd = php_win32_ioutil_open(realpath, open_flags, 0666);
+	}
 #else
 	fd = open(realpath, open_flags, 0666);
 #endif
@@ -1326,6 +1391,13 @@ PHPAPI php_stream *_php_stream_fopen(const char *filename, const char *mode, zen
 			 * O_APPEND mode) */
 			ret = php_stream_fopen_from_fd_rel(fd, mode, persistent_id, (open_flags & O_APPEND) == 0);
 		}
+#ifdef PHP_WIN32
+		if (ret && overlapped) {
+			php_stdio_stream_data *self = (php_stdio_stream_data*)ret->abstract;
+			self->is_overlapped = 1;
+			self->position = 0;
+		}
+#endif
 
 		if (EG(active)) {
 			/* clear stat cache as mtime and ctime might got changed - phar can use stream before

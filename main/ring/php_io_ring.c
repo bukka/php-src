@@ -159,14 +159,7 @@ PHPAPI const char *php_io_ring_backend_name(php_io_ring *ring)
 
 PHPAPI uint32_t php_io_ring_hook_flags(php_io_ring *ring)
 {
-#ifdef PHP_WIN32
-	/* IOCP completes file ops only on handles opened overlapped, which the
-	 * plain wrapper does not do yet (design section 7.3): regular files
-	 * stay synchronous in the core and never reach the ring */
-	uint32_t flags = 0;
-#else
 	uint32_t flags = PHP_IO_HOOKS_F_FILES;
-#endif
 	if (ring->features & IOR_FEAT_NATIVE_ASYNC) {
 		flags |= PHP_IO_HOOKS_F_DIRECT;
 	}
@@ -237,6 +230,18 @@ static void php_io_ring_req_free(php_io_ring *ring, php_io_ring_req *req)
 		efree(req->members);
 	}
 	efree(req);
+}
+
+/* Read and Write ops carry a file descriptor: on Windows a CRT one, whose
+ * handle is what IOCP works on (an overlapped one, the plain wrapper's
+ * promise for the files it hands over) */
+static zend_always_inline ior_fd_t php_io_ring_file_fd(php_io_op *op)
+{
+#ifdef PHP_WIN32
+	return (ior_fd_t) _get_osfhandle((int) op->fd);
+#else
+	return (ior_fd_t) op->fd;
+#endif
 }
 
 /* Work callbacks: the result handoff is the op's own shape, the callback
@@ -376,12 +381,12 @@ static zend_result php_io_ring_submit_one(php_io_ring *ring, php_io_ring_req *re
 			ior_prep_timeout(ctx, sqe, &ts, 0, 0);
 			break;
 		case PHP_IO_OP_READ:
-			ior_prep_read(ctx, sqe, (ior_fd_t) op->fd, op->u.io.buf, (unsigned) MIN(op->u.io.len, UINT32_MAX),
+			ior_prep_read(ctx, sqe, php_io_ring_file_fd(op), op->u.io.buf, (unsigned) MIN(op->u.io.len, UINT32_MAX),
 					op->u.io.offset < 0 ? IOR_OFF_NONE : (uint64_t) op->u.io.offset);
 			op->in_flight = true;
 			break;
 		case PHP_IO_OP_WRITE:
-			ior_prep_write(ctx, sqe, (ior_fd_t) op->fd, op->u.io.buf, (unsigned) MIN(op->u.io.len, UINT32_MAX),
+			ior_prep_write(ctx, sqe, php_io_ring_file_fd(op), op->u.io.buf, (unsigned) MIN(op->u.io.len, UINT32_MAX),
 					op->u.io.offset < 0 ? IOR_OFF_NONE : (uint64_t) op->u.io.offset);
 			op->in_flight = true;
 			break;

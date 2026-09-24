@@ -1017,7 +1017,7 @@ out:
  * synchronous. Pipes and character devices keep blocking descriptors, so
  * they wait for readiness first unless the provider performs the op. */
 static ssize_t php_io_file_op(php_stream *stream, int fd, php_deadline *dl, bool regular,
-		ssize_t (*syscall_fn)(int, void *, size_t), void *buf, size_t len,
+		ssize_t (*syscall_fn)(int, void *, size_t, int64_t), void *buf, size_t len, int64_t offset,
 		void (*prep)(php_io_op *, zend_object *, php_socket_t, void *, size_t, int64_t, php_deadline))
 {
 	uint32_t flags = php_io_hook_flags();
@@ -1033,7 +1033,7 @@ static ssize_t php_io_file_op(php_stream *stream, int fd, php_deadline *dl, bool
 	bool ready = false;
 	for (;;) {
 		if (offload) {
-			prep(&op, f.handle, fd, buf, len, -1, *dl);
+			prep(&op, f.handle, fd, buf, len, offset, *dl);
 			op.stream = stream;
 			if (php_io_run(&op, &result) == FAILURE) {
 				php_io_set_errno(ECANCELED);
@@ -1070,7 +1070,7 @@ static ssize_t php_io_file_op(php_stream *stream, int fd, php_deadline *dl, bool
 			}
 		}
 		do {
-			ret = syscall_fn(fd, buf, len);
+			ret = syscall_fn(fd, buf, len, offset);
 		} while (ret < 0 && errno == EINTR);
 		break;
 	}
@@ -1079,27 +1079,53 @@ static ssize_t php_io_file_op(php_stream *stream, int fd, php_deadline *dl, bool
 	return ret;
 }
 
-static ssize_t php_io_read_syscall(int fd, void *buf, size_t len)
+/* The synchronous forms; an offset means pread and pwrite, on Windows the
+ * overlapped call an overlapped descriptor needs */
+static ssize_t php_io_read_syscall(int fd, void *buf, size_t len, int64_t offset)
 {
-	return read(fd, buf, len);
+	if (offset < 0) {
+		return read(fd, buf, len);
+	}
+#ifdef PHP_WIN32
+	return php_win32_ioutil_pread(fd, buf, len, offset);
+#else
+	return pread(fd, buf, len, (off_t) offset);
+#endif
 }
 
-static ssize_t php_io_write_syscall(int fd, void *buf, size_t len)
+static ssize_t php_io_write_syscall(int fd, void *buf, size_t len, int64_t offset)
 {
-	return write(fd, buf, len);
+	if (offset < 0) {
+		return write(fd, buf, len);
+	}
+#ifdef PHP_WIN32
+	return php_win32_ioutil_pwrite(fd, buf, len, offset);
+#else
+	return pwrite(fd, buf, len, (off_t) offset);
+#endif
+}
+
+PHPAPI ssize_t php_io_read_at(php_stream *stream, int fd, void *buf, size_t len, int64_t offset, php_deadline *dl)
+{
+	bool regular = !stream || !(stream->flags & PHP_STREAM_FLAG_NO_SEEK);
+	return php_io_file_op(stream, fd, dl, regular, php_io_read_syscall, buf, len, offset, php_io_op_read);
+}
+
+PHPAPI ssize_t php_io_write_at(php_stream *stream, int fd, const void *buf, size_t len, int64_t offset, php_deadline *dl)
+{
+	bool regular = !stream || !(stream->flags & PHP_STREAM_FLAG_NO_SEEK);
+	return php_io_file_op(stream, fd, dl, regular, php_io_write_syscall, (void *) buf, len, offset,
+			(void (*)(php_io_op *, zend_object *, php_socket_t, void *, size_t, int64_t, php_deadline)) php_io_op_write);
 }
 
 PHPAPI ssize_t php_io_read(php_stream *stream, int fd, void *buf, size_t len, php_deadline *dl)
 {
-	bool regular = !stream || !(stream->flags & PHP_STREAM_FLAG_NO_SEEK);
-	return php_io_file_op(stream, fd, dl, regular, php_io_read_syscall, buf, len, php_io_op_read);
+	return php_io_read_at(stream, fd, buf, len, -1, dl);
 }
 
 PHPAPI ssize_t php_io_write(php_stream *stream, int fd, const void *buf, size_t len, php_deadline *dl)
 {
-	bool regular = !stream || !(stream->flags & PHP_STREAM_FLAG_NO_SEEK);
-	return php_io_file_op(stream, fd, dl, regular, php_io_write_syscall, (void *) buf, len,
-			(void (*)(php_io_op *, zend_object *, php_socket_t, void *, size_t, int64_t, php_deadline)) php_io_op_write);
+	return php_io_write_at(stream, fd, buf, len, -1, dl);
 }
 
 PHPAPI int php_io_fsync(php_stream *stream, int fd, bool data_only)
