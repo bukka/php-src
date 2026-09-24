@@ -32,13 +32,15 @@ $scheduler->spawn(function () use ($a, $c) {
     var_dump(stream_select($r, $w, $e, 0, 50000), $r);
     var_dump((hrtime(true) - $start) / 1e6 >= 40);
 
-    // Both readable by now: both reported, the writable side too
-    usleep(60000);
+    // Both readable by now (the writer's sends are ops of their own on a
+    // direct queue, so leave it a wide margin): both reported, the writable side too
+    usleep(150000);
     $r = [$a, $c]; $w = [$a]; $e = null;
     var_dump(stream_select($r, $w, $e, 1), count($r), $w === [$a]);
     var_dump(fread($a, 10), fread($c, 10));
 
-    // Blocking select woken by the other fiber
+    // Blocking select woken by the other fiber, told to go on
+    fwrite($a, "go");
     $r = [$a]; $w = null; $e = null;
     var_dump(stream_select($r, $w, $e, null), $r === [$a], fread($a, 10));
 });
@@ -46,7 +48,7 @@ $scheduler->spawn(function () use ($b, $d) {
     usleep(70000);
     fwrite($b, "one");
     fwrite($d, "two");
-    usleep(50000);
+    fread($b, 2);
     fwrite($b, "three");
 });
 $scheduler->loop();
