@@ -1,5 +1,5 @@
 /* This is a generated file, edit io_hooks.stub.php instead.
- * Stub hash: 199c2889120bc17143d95a033bdb8c1df5f5b10e
+ * Stub hash: dcddf3c14368503b63ffb0daa503fe728c9136d0
  * Has decl header: yes */
 
 #include "zend_enum.h"
@@ -82,6 +82,27 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_Io_Operation_Poll_isPersistent arginfo_Io_Hooks_is_active
 
+#define arginfo_class_Io_Operation_Read_getLength arginfo_class_Io_Completion_getResult
+
+#define arginfo_class_Io_Operation_Read_getOffset arginfo_class_Io_Completion_getResult
+
+#define arginfo_class_Io_Operation_Write_getLength arginfo_class_Io_Completion_getResult
+
+#define arginfo_class_Io_Operation_Write_getOffset arginfo_class_Io_Completion_getResult
+
+#define arginfo_class_Io_Operation_Recv_getLength arginfo_class_Io_Completion_getResult
+
+#define arginfo_class_Io_Operation_Recv_getFlags arginfo_class_Io_Completion_getResult
+
+#define arginfo_class_Io_Operation_Send_getLength arginfo_class_Io_Completion_getResult
+
+#define arginfo_class_Io_Operation_Send_getFlags arginfo_class_Io_Completion_getResult
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Io_Operation_Connect_getAddress, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_Io_Operation_Fsync_isDataOnly arginfo_Io_Hooks_is_active
+
 #define arginfo_class_Io_Operation_Any_getOperations arginfo_class_Io_Operation_getEvents
 
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Io_Operation_Any_completeWith, 0, 1, Io\\Completion, 0)
@@ -138,6 +159,16 @@ ZEND_METHOD(Io_Completion, getError);
 ZEND_METHOD(Io_Completion, getData);
 ZEND_METHOD(Io_Completion, getCompletions);
 ZEND_METHOD(Io_Operation_Poll, isPersistent);
+ZEND_METHOD(Io_Operation_Read, getLength);
+ZEND_METHOD(Io_Operation_Read, getOffset);
+ZEND_METHOD(Io_Operation_Write, getLength);
+ZEND_METHOD(Io_Operation_Write, getOffset);
+ZEND_METHOD(Io_Operation_Recv, getLength);
+ZEND_METHOD(Io_Operation_Recv, getFlags);
+ZEND_METHOD(Io_Operation_Send, getLength);
+ZEND_METHOD(Io_Operation_Send, getFlags);
+ZEND_METHOD(Io_Operation_Connect, getAddress);
+ZEND_METHOD(Io_Operation_Fsync, isDataOnly);
 ZEND_METHOD(Io_Operation_Any, getOperations);
 ZEND_METHOD(Io_Operation_Any, completeWith);
 ZEND_METHOD(Io_Poll_OperationQueue, __construct);
@@ -193,6 +224,40 @@ static const zend_function_entry class_Io_OperationQueue_methods[] = {
 
 static const zend_function_entry class_Io_Operation_Poll_methods[] = {
 	ZEND_ME(Io_Operation_Poll, isPersistent, arginfo_class_Io_Operation_Poll_isPersistent, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_Io_Operation_Read_methods[] = {
+	ZEND_ME(Io_Operation_Read, getLength, arginfo_class_Io_Operation_Read_getLength, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Operation_Read, getOffset, arginfo_class_Io_Operation_Read_getOffset, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_Io_Operation_Write_methods[] = {
+	ZEND_ME(Io_Operation_Write, getLength, arginfo_class_Io_Operation_Write_getLength, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Operation_Write, getOffset, arginfo_class_Io_Operation_Write_getOffset, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_Io_Operation_Recv_methods[] = {
+	ZEND_ME(Io_Operation_Recv, getLength, arginfo_class_Io_Operation_Recv_getLength, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Operation_Recv, getFlags, arginfo_class_Io_Operation_Recv_getFlags, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_Io_Operation_Send_methods[] = {
+	ZEND_ME(Io_Operation_Send, getLength, arginfo_class_Io_Operation_Send_getLength, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Operation_Send, getFlags, arginfo_class_Io_Operation_Send_getFlags, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_Io_Operation_Connect_methods[] = {
+	ZEND_ME(Io_Operation_Connect, getAddress, arginfo_class_Io_Operation_Connect_getAddress, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_Io_Operation_Fsync_methods[] = {
+	ZEND_ME(Io_Operation_Fsync, isDataOnly, arginfo_class_Io_Operation_Fsync_isDataOnly, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 
@@ -297,6 +362,76 @@ static zend_class_entry *register_class_Io_Operation_Timer(zend_class_entry *cla
 	zend_class_entry ce, *class_entry;
 
 	INIT_NS_CLASS_ENTRY(ce, "Io\\Operation", "Timer", NULL);
+	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Io_Operation, ZEND_ACC_FINAL);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_Io_Operation_Read(zend_class_entry *class_entry_Io_Operation)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "Io\\Operation", "Read", class_Io_Operation_Read_methods);
+	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Io_Operation, ZEND_ACC_FINAL);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_Io_Operation_Write(zend_class_entry *class_entry_Io_Operation)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "Io\\Operation", "Write", class_Io_Operation_Write_methods);
+	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Io_Operation, ZEND_ACC_FINAL);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_Io_Operation_Recv(zend_class_entry *class_entry_Io_Operation)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "Io\\Operation", "Recv", class_Io_Operation_Recv_methods);
+	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Io_Operation, ZEND_ACC_FINAL);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_Io_Operation_Send(zend_class_entry *class_entry_Io_Operation)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "Io\\Operation", "Send", class_Io_Operation_Send_methods);
+	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Io_Operation, ZEND_ACC_FINAL);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_Io_Operation_Accept(zend_class_entry *class_entry_Io_Operation)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "Io\\Operation", "Accept", NULL);
+	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Io_Operation, ZEND_ACC_FINAL);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_Io_Operation_Connect(zend_class_entry *class_entry_Io_Operation)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "Io\\Operation", "Connect", class_Io_Operation_Connect_methods);
+	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Io_Operation, ZEND_ACC_FINAL);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_Io_Operation_Fsync(zend_class_entry *class_entry_Io_Operation)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "Io\\Operation", "Fsync", class_Io_Operation_Fsync_methods);
 	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Io_Operation, ZEND_ACC_FINAL);
 
 	return class_entry;

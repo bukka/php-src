@@ -32,6 +32,13 @@ static zend_class_entry *php_io_operation_ce;
 static zend_class_entry *php_io_operation_poll_ce;
 static zend_class_entry *php_io_operation_timer_ce;
 static zend_class_entry *php_io_operation_any_ce;
+static zend_class_entry *php_io_operation_read_ce;
+static zend_class_entry *php_io_operation_write_ce;
+static zend_class_entry *php_io_operation_recv_ce;
+static zend_class_entry *php_io_operation_send_ce;
+static zend_class_entry *php_io_operation_accept_ce;
+static zend_class_entry *php_io_operation_connect_ce;
+static zend_class_entry *php_io_operation_fsync_ce;
 static zend_class_entry *php_io_completion_ce;
 static zend_class_entry *php_io_invalid_operation_exception_ce;
 PHPAPI zend_class_entry *php_io_operation_queue_ce;
@@ -115,6 +122,13 @@ static zend_class_entry *php_io_operation_ce_for(php_io_op_type type)
 		case PHP_IO_OP_POLL: return php_io_operation_poll_ce;
 		case PHP_IO_OP_TIMER: return php_io_operation_timer_ce;
 		case PHP_IO_OP_ANY: return php_io_operation_any_ce;
+		case PHP_IO_OP_READ: return php_io_operation_read_ce;
+		case PHP_IO_OP_WRITE: return php_io_operation_write_ce;
+		case PHP_IO_OP_RECV: return php_io_operation_recv_ce;
+		case PHP_IO_OP_SEND: return php_io_operation_send_ce;
+		case PHP_IO_OP_ACCEPT: return php_io_operation_accept_ce;
+		case PHP_IO_OP_CONNECT: return php_io_operation_connect_ce;
+		case PHP_IO_OP_FSYNC: return php_io_operation_fsync_ce;
 		default: return php_io_operation_ce;
 	}
 }
@@ -334,6 +348,55 @@ PHP_METHOD(Io_Operation_Poll, isPersistent)
 		RETURN_THROWS();
 	}
 	RETURN_BOOL(op->flags & PHP_IO_OP_F_PERSISTENT);
+}
+
+/* Data operations */
+
+static php_io_op *php_io_operation_fetch_type(zval *zv, php_io_op_type type)
+{
+	php_io_op *op = php_io_operation_fetch(zv);
+	if (op && op->type != type) {
+		zend_throw_error(NULL, "Operation of an unexpected type");
+		return NULL;
+	}
+	return op;
+}
+
+#define PHP_IO_DATA_GETTER(cls, type, expr) \
+	{ \
+		ZEND_PARSE_PARAMETERS_NONE(); \
+		php_io_op *op = php_io_operation_fetch_type(ZEND_THIS, type); \
+		if (!op) { \
+			RETURN_THROWS(); \
+		} \
+		expr; \
+	}
+
+PHP_METHOD(Io_Operation_Read, getLength) PHP_IO_DATA_GETTER(Read, PHP_IO_OP_READ, RETURN_LONG((zend_long) op->u.io.len))
+PHP_METHOD(Io_Operation_Read, getOffset) PHP_IO_DATA_GETTER(Read, PHP_IO_OP_READ, RETURN_LONG((zend_long) op->u.io.offset))
+PHP_METHOD(Io_Operation_Write, getLength) PHP_IO_DATA_GETTER(Write, PHP_IO_OP_WRITE, RETURN_LONG((zend_long) op->u.io.len))
+PHP_METHOD(Io_Operation_Write, getOffset) PHP_IO_DATA_GETTER(Write, PHP_IO_OP_WRITE, RETURN_LONG((zend_long) op->u.io.offset))
+PHP_METHOD(Io_Operation_Recv, getLength) PHP_IO_DATA_GETTER(Recv, PHP_IO_OP_RECV, RETURN_LONG((zend_long) op->u.io.len))
+PHP_METHOD(Io_Operation_Recv, getFlags) PHP_IO_DATA_GETTER(Recv, PHP_IO_OP_RECV, RETURN_LONG(op->u.io.flags))
+PHP_METHOD(Io_Operation_Send, getLength) PHP_IO_DATA_GETTER(Send, PHP_IO_OP_SEND, RETURN_LONG((zend_long) op->u.io.len))
+PHP_METHOD(Io_Operation_Send, getFlags) PHP_IO_DATA_GETTER(Send, PHP_IO_OP_SEND, RETURN_LONG(op->u.io.flags))
+PHP_METHOD(Io_Operation_Fsync, isDataOnly) PHP_IO_DATA_GETTER(Fsync, PHP_IO_OP_FSYNC, RETURN_BOOL(op->u.fsync.data_only))
+
+PHP_METHOD(Io_Operation_Connect, getAddress)
+{
+	ZEND_PARSE_PARAMETERS_NONE();
+
+	php_io_op *op = php_io_operation_fetch_type(ZEND_THIS, PHP_IO_OP_CONNECT);
+	if (!op) {
+		RETURN_THROWS();
+	}
+	zend_string *textaddr = NULL;
+	php_network_populate_name_from_sockaddr((struct sockaddr *) op->u.connect.addr, op->u.connect.addrlen,
+			&textaddr, NULL, NULL);
+	if (!textaddr) {
+		RETURN_EMPTY_STRING();
+	}
+	RETURN_STR(textaddr);
 }
 
 /* Io\Operation\Any */
@@ -1053,6 +1116,19 @@ PHP_MINIT_FUNCTION(io_hooks)
 	php_io_operation_any_ce = register_class_Io_Operation_Any(php_io_operation_ce);
 	php_io_operation_any_ce->create_object = php_io_operation_create_object;
 	php_io_operation_any_ce->default_object_handlers = &php_io_operation_handlers;
+
+#define PHP_IO_REGISTER_DATA_OP(var, name) \
+	var = register_class_Io_Operation_##name(php_io_operation_ce); \
+	var->create_object = php_io_operation_create_object; \
+	var->default_object_handlers = &php_io_operation_handlers
+	PHP_IO_REGISTER_DATA_OP(php_io_operation_read_ce, Read);
+	PHP_IO_REGISTER_DATA_OP(php_io_operation_write_ce, Write);
+	PHP_IO_REGISTER_DATA_OP(php_io_operation_recv_ce, Recv);
+	PHP_IO_REGISTER_DATA_OP(php_io_operation_send_ce, Send);
+	PHP_IO_REGISTER_DATA_OP(php_io_operation_accept_ce, Accept);
+	PHP_IO_REGISTER_DATA_OP(php_io_operation_connect_ce, Connect);
+	PHP_IO_REGISTER_DATA_OP(php_io_operation_fsync_ce, Fsync);
+#undef PHP_IO_REGISTER_DATA_OP
 
 	php_io_completion_ce = register_class_Io_Completion();
 	php_io_completion_ce->create_object = php_io_completion_create_object;

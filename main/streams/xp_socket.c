@@ -78,40 +78,25 @@ static ssize_t php_sockop_write(php_stream *stream, const char *buf, size_t coun
 	else
 		ptimeout = &sock->timeout;
 
-	/* Computed once, so retries after a wait continue with the remaining time */
-	php_deadline deadline;
-	bool have_deadline = false;
-
-retry:
-	didwrite = send(sock->socket, buf, XP_SOCK_BUF_SIZE(count), 0);
+	if (sock->is_blocked) {
+		php_deadline deadline;
+		php_deadline_init(&deadline, ptimeout);
+		sock->timeout_event = false;
+		didwrite = php_io_send(stream, sock->socket, buf, XP_SOCK_BUF_SIZE(count), 0, &deadline);
+	} else {
+		didwrite = send(sock->socket, buf, XP_SOCK_BUF_SIZE(count), 0);
+	}
 
 	if (didwrite <= 0) {
 		char *estr;
 		int err = php_socket_errno();
 
-		if (PHP_IS_TRANSIENT_ERROR(err)) {
-			if (sock->is_blocked) {
-				sock->timeout_event = false;
-
-				if (!have_deadline) {
-					php_deadline_init(&deadline, ptimeout);
-					have_deadline = true;
-				}
-
-				int n = php_io_poll(stream, sock->socket, PHP_POLL_WRITE, &deadline);
-				if (n > 0) {
-					goto retry;
-				}
-				if (n == 0) {
-					sock->timeout_event = true;
-				} else {
-					err = php_socket_errno();
-				}
-			} else {
-				/* EWOULDBLOCK/EAGAIN is not an error for a non-blocking stream.
-				 * Report zero byte write instead. */
-				return 0;
-			}
+		if (err == ETIMEDOUT && sock->is_blocked) {
+			sock->timeout_event = true;
+		} else if (PHP_IS_TRANSIENT_ERROR(err)) {
+			/* EWOULDBLOCK/EAGAIN is not an error for a non-blocking stream.
+			 * Report zero byte write instead. */
+			return 0;
 		}
 
 		if (!(stream->flags & PHP_STREAM_FLAG_SUPPRESS_ERRORS) && !EG(exception)) {
@@ -137,12 +122,12 @@ static ssize_t php_sockop_read(php_stream *stream, char *buf, size_t count)
 		return -1;
 	}
 
-	ssize_t nr_bytes = recv(sock->socket, buf, XP_SOCK_BUF_SIZE(count), 0);
-	int err = php_socket_errno();
+	ssize_t nr_bytes;
+	int err;
 
 	sock->timeout_event = false;
 
-	if (nr_bytes < 0 && PHP_IS_TRANSIENT_ERROR(err) && sock->is_blocked) {
+	if (sock->is_blocked) {
 		bool has_buffered_data = stream->has_buffered_data;
 
 		/* With data already buffered, only check whether more is there */
@@ -153,25 +138,15 @@ static ssize_t php_sockop_read(php_stream *stream, char *buf, size_t count)
 			php_deadline_init(&deadline, sock->timeout.tv_sec == -1 ? NULL : &sock->timeout);
 		}
 
-		for (;;) {
-			int n = php_io_poll(stream, sock->socket, PHP_POLL_READ, &deadline);
-
-			if (n == 0) {
-				sock->timeout_event = true;
-				return has_buffered_data ? 0 : -1;
-			}
-			if (n < 0) {
-				err = php_socket_errno();
-				break;
-			}
-
-			nr_bytes = recv(sock->socket, buf, XP_SOCK_BUF_SIZE(count), 0);
-			err = php_socket_errno();
-			if (nr_bytes >= 0 || !PHP_IS_TRANSIENT_ERROR(err)) {
-				break;
-			}
-			/* Spurious wakeup: wait again with the remaining time */
+		nr_bytes = php_io_recv(stream, sock->socket, buf, XP_SOCK_BUF_SIZE(count), 0, &deadline);
+		err = php_socket_errno();
+		if (nr_bytes < 0 && (err == ETIMEDOUT || (has_buffered_data && PHP_IS_TRANSIENT_ERROR(err)))) {
+			sock->timeout_event = true;
+			return has_buffered_data ? 0 : -1;
 		}
+	} else {
+		nr_bytes = recv(sock->socket, buf, XP_SOCK_BUF_SIZE(count), 0);
+		err = php_socket_errno();
 	}
 
 	if (nr_bytes < 0) {
@@ -868,7 +843,7 @@ static inline int php_tcp_sockop_connect(php_stream *stream, php_netstream_data_
 
 		parse_unix_address(stream, xparam, &unix_addr);
 
-		ret = php_network_connect_socket(sock->socket,
+		ret = php_network_connect_socket(stream, sock->socket,
 				(const struct sockaddr *)&unix_addr, (socklen_t) offsetof(struct sockaddr_un, sun_path) + xparam->inputs.namelen,
 				xparam->op == STREAM_XPORT_OP_CONNECT_ASYNC, xparam->inputs.timeout,
 				xparam->want_errortext ? &xparam->outputs.error_text : NULL,
@@ -974,7 +949,7 @@ static inline int php_tcp_sockop_connect(php_stream *stream, php_netstream_data_
 	 * want the default to be TCP sockets so that the openssl extension can
 	 * re-use this code. */
 
-	sock->socket = php_network_connect_socket_to_host_ex(host, portno,
+	sock->socket = php_network_connect_socket_to_host_ex(stream, &sock->socket, host, portno,
 			PHP_STREAM_XPORT_IS_UDP(stream) ? SOCK_DGRAM : SOCK_STREAM,
 			xparam->op == STREAM_XPORT_OP_CONNECT_ASYNC,
 			xparam->inputs.timeout,

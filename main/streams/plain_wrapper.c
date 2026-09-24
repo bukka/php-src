@@ -17,6 +17,7 @@
 #include "php_network.h"
 #include "php_open_temporary_file.h"
 #include "ext/standard/file.h"
+#include "main/hooks/io_hooks.h"
 #include "ext/standard/flock_compat.h"
 #include "ext/standard/php_filestat.h"
 #include <stddef.h>
@@ -395,7 +396,9 @@ static ssize_t php_stdiop_write(php_stream *stream, const char *buf, size_t coun
 #ifdef PHP_WIN32
 		bytes_written = _write(data->fd, buf, PLAIN_WRAP_BUF_SIZE(count));
 #else
-		bytes_written = write(data->fd, buf, count);
+		php_deadline deadline;
+		php_deadline_init_infinite(&deadline);
+		bytes_written = php_io_write(stream, data->fd, buf, count, &deadline);
 #endif
 		if (bytes_written < 0) {
 			if (PHP_IS_TRANSIENT_ERROR(errno)) {
@@ -468,6 +471,7 @@ static ssize_t php_stdiop_read(php_stream *stream, char *buf, size_t count)
 			}
 		}
 #endif
+#ifdef PHP_WIN32
 		ret = read(data->fd, buf,  PLAIN_WRAP_BUF_SIZE(count));
 
 		if (ret == (size_t)-1 && errno == EINTR) {
@@ -476,6 +480,11 @@ static ssize_t php_stdiop_read(php_stream *stream, char *buf, size_t count)
 			   so script can retry if desired */
 			ret = read(data->fd, buf,  PLAIN_WRAP_BUF_SIZE(count));
 		}
+#else
+		php_deadline deadline;
+		php_deadline_init_infinite(&deadline);
+		ret = php_io_read(stream, data->fd, buf, PLAIN_WRAP_BUF_SIZE(count), &deadline);
+#endif
 
 		if (ret < 0) {
 			if (PHP_IS_TRANSIENT_ERROR(errno)) {
@@ -619,11 +628,7 @@ static int php_stdiop_sync(php_stream *stream, bool dataonly)
 
 	if (php_stdiop_flush(stream) == 0) {
 		PHP_STDIOP_GET_FD(fd, data);
-		if (dataonly) {
-			return fdatasync(fd);
-		} else {
-			return fsync(fd);
-		}
+		return php_io_fsync(stream, fd, dataonly);
 	}
 	return -1;
 }

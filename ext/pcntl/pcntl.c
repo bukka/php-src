@@ -26,6 +26,7 @@
 #endif
 
 #include "php.h"
+#include "main/hooks/io_hooks.h"
 #include "ext/standard/info.h"
 #include "php_signal.h"
 #include "php_ticks.h"
@@ -268,6 +269,12 @@ PHP_FUNCTION(pcntl_fork)
 	pid_t id;
 
 	ZEND_PARSE_PARAMETERS_NONE();
+
+	if (php_io_ops_in_flight() > 0) {
+		/* An operation submitted to a queue would not be in flight in the child */
+		zend_throw_error(NULL, "Cannot fork while IO operations are in flight");
+		RETURN_THROWS();
+	}
 
 	id = fork();
 	if (id == -1) {

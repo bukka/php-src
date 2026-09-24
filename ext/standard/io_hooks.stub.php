@@ -111,6 +111,49 @@ namespace Io\Operation {
 
     final class Timer extends \Io\Operation {}
 
+    final class Read extends \Io\Operation
+    {
+        public function getLength(): int {}
+
+        /** -1 for the current position */
+        public function getOffset(): int {}
+    }
+
+    final class Write extends \Io\Operation
+    {
+        public function getLength(): int {}
+
+        public function getOffset(): int {}
+    }
+
+    final class Recv extends \Io\Operation
+    {
+        public function getLength(): int {}
+
+        /** MSG_* */
+        public function getFlags(): int {}
+    }
+
+    final class Send extends \Io\Operation
+    {
+        public function getLength(): int {}
+
+        public function getFlags(): int {}
+    }
+
+    final class Accept extends \Io\Operation {}
+
+    final class Connect extends \Io\Operation
+    {
+        /** Textual, as stream_socket_get_name() */
+        public function getAddress(): string {}
+    }
+
+    final class Fsync extends \Io\Operation
+    {
+        public function isDataOnly(): bool {}
+    }
+
     /** Wait on several Poll and Timer operations at once. */
     final class Any extends \Io\Operation
     {
