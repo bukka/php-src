@@ -46,7 +46,9 @@ PHPAPI void php_io_ring_destroy(php_io_ring *ring);
 PHPAPI zend_result php_io_ring_submit_op(php_io_ring *ring, php_io_op *op, void *data);
 PHPAPI zend_result php_io_ring_cancel(php_io_ring *ring, php_io_op *op);
 /* Hand an in-flight op to the ring: cancelled and finished silently */
-PHPAPI void php_io_ring_orphan(php_io_ring *ring, php_io_op *op);
+/* True when the record stays in flight and the stream must stay frozen */
+PHPAPI bool php_io_ring_orphan(php_io_ring *ring, php_io_op *op);
+PHPAPI void php_io_ring_drain(php_io_ring *ring, php_stream *stream);
 
 /* With a zero timeout it first clears the notification descriptor. */
 PHPAPI int php_io_ring_wait(php_io_ring *ring, php_io_queue_completion *out, uint32_t max, const struct timespec *timeout);

@@ -373,6 +373,12 @@ fprintf(stderr, "stream_free: %s:%p[%s] preserve_handle=%d release_cast=%d remov
 			return ret;
 		}
 
+		/* An operation a queue kept past its frame must settle before the
+		 * buffer goes away */
+		if (stream->flags & PHP_STREAM_FLAG_IN_USE) {
+			php_io_stream_drain(stream);
+		}
+
 		/* Watchers must unregister while the fd is still open */
 		if (stream->poll_watchers) {
 			php_io_poll_stream_notify_close(stream);

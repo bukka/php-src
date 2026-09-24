@@ -626,6 +626,7 @@ static const php_io_queue_ops php_io_poll_queue_ops = {
 	.remove = php_io_poll_queue_remove,
 	.wait = php_io_poll_queue_wait,
 	.orphan = php_io_poll_queue_orphan,
+	.drain = NULL,
 	.count_pending = php_io_poll_queue_count_pending,
 	.hook_flags = php_io_poll_queue_hook_flags,
 	.destroy = php_io_poll_queue_destroy,

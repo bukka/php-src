@@ -37,6 +37,7 @@ struct _php_io_ring_req {
 	int32_t lt_res;
 	bool cancelled;                 /* cancel() was called */
 	bool orphaned;                  /* nobody wants the completion */
+	php_stream *orphan_stream;      /* frozen until the record settled */
 	bool ready;                     /* top-level: completion to deliver */
 	bool fired;                     /* group: in the fired list */
 	bool group_done;                /* member: the group folded already */
@@ -69,6 +70,12 @@ struct php_io_ring {
 #define PHP_IO_RING_TAG_LT     ((uintptr_t) 1)
 #define PHP_IO_RING_TAG_CANCEL ((uintptr_t) 2)
 #define PHP_IO_RING_TAG_MASK   ((uintptr_t) 3)
+
+/* Every cqe of the record arrived */
+static zend_always_inline bool php_io_ring_req_settled(php_io_ring_req *req)
+{
+	return req->main_done && (!req->has_lt || req->lt_done);
+}
 
 static void php_io_ring_list_push(php_io_ring_req ***list, uint32_t *n, uint32_t *cap, php_io_ring_req *req)
 {
@@ -163,8 +170,17 @@ PHPAPI void php_io_ring_notify_clear(php_io_ring *ring)
 
 PHPAPI uint32_t php_io_ring_count_pending(php_io_ring *ring)
 {
-	return ring->pending;
+	/* Orphans included: a loop must keep reaping until they settled */
+	uint32_t n = ring->pending;
+	for (php_io_ring_req *r = ring->live; r; r = r->next) {
+		if (r->orphaned && !r->ready && !php_io_ring_req_settled(r)) {
+			n++;
+		}
+	}
+	return n;
 }
+
+static uint32_t php_io_ring_reap(php_io_ring *ring);
 
 /* Records */
 
@@ -183,6 +199,10 @@ static php_io_ring_req *php_io_ring_req_create(php_io_ring *ring, php_io_op *op,
 
 static void php_io_ring_req_free(php_io_ring *ring, php_io_ring_req *req)
 {
+	if (req->orphan_stream) {
+		php_io_stream_unfreeze(req->orphan_stream);
+		req->orphan_stream = NULL;
+	}
 	if (req->prev) {
 		req->prev->next = req->next;
 	} else {
@@ -195,12 +215,6 @@ static void php_io_ring_req_free(php_io_ring *ring, php_io_ring_req *req)
 		efree(req->members);
 	}
 	efree(req);
-}
-
-/* Every cqe of the record arrived */
-static zend_always_inline bool php_io_ring_req_settled(php_io_ring_req *req)
-{
-	return req->main_done && (!req->has_lt || req->lt_done);
 }
 
 /* Work callbacks: the result handoff is the op's own shape, the callback
@@ -452,6 +466,10 @@ static void php_io_ring_req_cancel(php_io_ring *ring, php_io_ring_req *req)
 static void php_io_ring_req_release(php_io_ring *ring, php_io_ring_req *req)
 {
 	req->orphaned = true;
+	if (php_io_ring_req_settled(req)) {
+		/* Nothing outstanding: no freeze to keep */
+		req->orphan_stream = NULL;
+	}
 	if (req->ready) {
 		php_io_ring_list_remove(ring->ready, &ring->n_ready, req);
 		req->ready = false;
@@ -499,11 +517,45 @@ PHPAPI zend_result php_io_ring_cancel(php_io_ring *ring, php_io_op *op)
 	return SUCCESS;
 }
 
-PHPAPI void php_io_ring_orphan(php_io_ring *ring, php_io_op *op)
+PHPAPI bool php_io_ring_orphan(php_io_ring *ring, php_io_op *op)
 {
-	/* The caller's frame is going away; the record keeps the ring's
-	 * references and finishes silently in a later wait */
+	/* The caller's frame is going away; a record still in flight keeps the
+	 * stream frozen and finishes silently in a later wait */
+	php_io_ring_req *req = op->queue_data;
+	bool keep = req && op->in_flight && op->stream && !req->group
+			&& op->type != PHP_IO_OP_ANY && !php_io_ring_req_settled(req);
+	if (keep) {
+		req->orphan_stream = op->stream;
+	}
 	php_io_ring_cancel(ring, op);
+	if (keep) {
+		op->in_flight = true;
+	}
+	return keep;
+}
+
+/* Wait until every orphaned op on the stream settled; other completions
+ * stay queued for delivery */
+PHPAPI void php_io_ring_drain(php_io_ring *ring, php_stream *stream)
+{
+	for (;;) {
+		bool pending = false;
+		for (php_io_ring_req *r = ring->live; r; r = r->next) {
+			if (r->orphan_stream == stream) {
+				pending = true;
+				break;
+			}
+		}
+		if (!pending) {
+			return;
+		}
+		ior_cqe *cqe;
+		int rc = ior_wait_cqe(ring->ctx, &cqe);
+		if (rc < 0 && rc != -EINTR) {
+			return;
+		}
+		php_io_ring_reap(ring);
+	}
 }
 
 /* Completion processing */
@@ -857,9 +909,14 @@ static int php_io_ring_queue_wait(php_io_queue *base, php_io_queue_completion *o
 
 static void php_io_ring_queue_orphan(php_io_queue *base, php_io_op *op)
 {
-	if (op->queue == base) {
-		php_io_ring_orphan(((php_io_ring_queue *) base)->ring, op);
+	if (op->queue == base && php_io_ring_orphan(((php_io_ring_queue *) base)->ring, op)) {
+		php_io_stream_orphan(op->stream, base);
 	}
+}
+
+static void php_io_ring_queue_drain(php_io_queue *base, php_stream *stream)
+{
+	php_io_ring_drain(((php_io_ring_queue *) base)->ring, stream);
 }
 
 static uint32_t php_io_ring_queue_count_pending(php_io_queue *base)
@@ -886,6 +943,7 @@ static const php_io_queue_ops php_io_ring_queue_ops = {
 	.remove = php_io_ring_queue_remove,
 	.wait = php_io_ring_queue_wait,
 	.orphan = php_io_ring_queue_orphan,
+	.drain = php_io_ring_queue_drain,
 	.count_pending = php_io_ring_queue_count_pending,
 	.hook_flags = php_io_ring_queue_hook_flags,
 	.destroy = php_io_ring_queue_destroy,

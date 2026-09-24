@@ -280,6 +280,84 @@ PHPAPI void php_io_hooks_request_shutdown(void)
 		FG(io_queue) = NULL;
 		q->ops->destroy(q);
 	}
+	if (FG(io_orphans)) {
+		zend_hash_destroy(FG(io_orphans));
+		efree(FG(io_orphans));
+		FG(io_orphans) = NULL;
+	}
+}
+
+PHPAPI uint32_t php_io_ops_in_flight(void)
+{
+	return FG(io_ops_in_flight);
+}
+
+/* Orphans */
+
+static zend_always_inline zend_ulong php_io_stream_key(php_stream *stream)
+{
+	zend_ulong key = (zend_ulong) (uintptr_t) stream;
+	return (key >> 3) | (key << ((sizeof(key) * 8) - 3));
+}
+
+typedef struct {
+	php_io_queue *queue;
+	bool freeing;               /* php_stream_free() is draining it: the resource is closing under us */
+} php_io_orphan;
+
+static void php_io_orphan_dtor(zval *zv)
+{
+	efree(Z_PTR_P(zv));
+}
+
+PHPAPI void php_io_stream_orphan(php_stream *stream, php_io_queue *queue)
+{
+	if (!FG(io_orphans)) {
+		FG(io_orphans) = emalloc(sizeof(HashTable));
+		zend_hash_init(FG(io_orphans), 4, NULL, php_io_orphan_dtor, 0);
+	}
+	if (!zend_hash_index_exists(FG(io_orphans), php_io_stream_key(stream))) {
+		php_io_orphan *o = emalloc(sizeof(*o));
+		o->queue = queue;
+		o->freeing = false;
+		/* The buffer belongs to the backend until the completion arrives */
+		GC_ADDREF(stream->res);
+		zend_hash_index_add_new_ptr(FG(io_orphans), php_io_stream_key(stream), o);
+	}
+}
+
+PHPAPI void php_io_stream_unfreeze(php_stream *stream)
+{
+	if (!FG(io_orphans)) {
+		return;
+	}
+	php_io_orphan *o = zend_hash_index_find_ptr(FG(io_orphans), php_io_stream_key(stream));
+	if (!o) {
+		return;
+	}
+	bool freeing = o->freeing;
+	zend_hash_index_del(FG(io_orphans), php_io_stream_key(stream));
+	stream->flags &= ~PHP_STREAM_FLAG_IN_USE;
+	if (!freeing) {
+		zend_list_delete(stream->res);
+	}
+}
+
+/* Called from php_stream_free() with the stream still frozen */
+PHPAPI void php_io_stream_drain(php_stream *stream)
+{
+	if (!FG(io_orphans)) {
+		return;
+	}
+	php_io_orphan *o = zend_hash_index_find_ptr(FG(io_orphans), php_io_stream_key(stream));
+	if (!o) {
+		return;
+	}
+	o->freeing = true;
+	if (o->queue->ops->drain) {
+		o->queue->ops->drain(o->queue, stream);
+	}
+	php_io_stream_unfreeze(stream);
 }
 
 /* Entry point */
@@ -425,7 +503,17 @@ static zend_result php_io_run_sync(php_io_op *op, php_io_op_result *result)
 	return SUCCESS;
 }
 
+static zend_result php_io_run_ex(php_io_op *op, php_io_op_result *result);
+
 PHPAPI zend_result php_io_run(php_io_op *op, php_io_op_result *result)
+{
+	FG(io_ops_in_flight)++;
+	zend_result rc = php_io_run_ex(op, result);
+	FG(io_ops_in_flight)--;
+	return rc;
+}
+
+static zend_result php_io_run_ex(php_io_op *op, php_io_op_result *result)
 {
 	php_io_hooks_state *state = FG(io_hooks);
 
@@ -485,37 +573,337 @@ static int php_io_poll_result_to_revents(const php_io_op_result *result, uint32_
 	}
 }
 
+/* The stream is frozen for the duration; a queue keeping the op past this
+ * frame (the ring on an abnormal exit) keeps it frozen until the op settled */
+typedef struct {
+	php_stream *stream;
+	zend_object *handle;
+} php_io_frame;
+
+static void php_io_frame_begin(php_io_frame *f, php_stream *stream)
+{
+	f->stream = stream;
+	f->handle = NULL;
+	if (stream) {
+		if (FG(io_hooks)) {
+			zval handle_zv;
+			php_stream_poll_weak_handle_from_stream(&handle_zv, stream);
+			f->handle = Z_OBJ(handle_zv);
+		}
+		ZEND_ASSERT(!(stream->flags & PHP_STREAM_FLAG_IN_USE));
+		stream->flags |= PHP_STREAM_FLAG_IN_USE;
+	}
+}
+
+static void php_io_frame_end(php_io_frame *f, php_io_op *op)
+{
+	if (f->stream && !(op && op->in_flight)) {
+		f->stream->flags &= ~PHP_STREAM_FLAG_IN_USE;
+	}
+	if (f->handle) {
+		OBJ_RELEASE(f->handle);
+	}
+}
+
+static zend_always_inline uint32_t php_io_hook_flags(void)
+{
+	php_io_hooks_state *state = FG(io_hooks);
+	return state ? state->hooks.flags : 0;
+}
+
 PHPAPI int php_io_poll(php_stream *stream, php_socket_t fd, uint32_t events, php_deadline *dl)
 {
 	php_io_op op;
 	php_io_op_result result;
-	zend_object *handle = NULL;
+	php_io_frame f;
 
-	if (stream && FG(io_hooks)) {
-		zval handle_zv;
-		php_stream_poll_weak_handle_from_stream(&handle_zv, stream);
-		handle = Z_OBJ(handle_zv);
-	}
-
-	php_io_op_poll(&op, handle, fd, events, *dl);
-
-	if (stream) {
-		ZEND_ASSERT(!(stream->flags & PHP_STREAM_FLAG_IN_USE));
-		stream->flags |= PHP_STREAM_FLAG_IN_USE;
-	}
+	php_io_frame_begin(&f, stream);
+	php_io_op_poll(&op, f.handle, fd, events, *dl);
+	op.stream = stream;
 	zend_result rc = php_io_run(&op, &result);
-	if (stream) {
-		stream->flags &= ~PHP_STREAM_FLAG_IN_USE;
-	}
-	if (handle) {
-		OBJ_RELEASE(handle);
-	}
+	php_io_frame_end(&f, &op);
 
 	if (rc == FAILURE) {
 		errno = ECANCELED;
 		return -1;
 	}
 	return php_io_poll_result_to_revents(&result, events);
+}
+
+/* Status to a syscall-like return for a data op; true when the caller is done */
+static bool php_io_data_result(const php_io_op_result *result, ssize_t *ret)
+{
+	switch (result->status) {
+		case PHP_IO_DONE:
+			if (result->error) {
+				errno = result->error;
+				*ret = -1;
+			} else {
+				*ret = (ssize_t) result->res;
+			}
+			return true;
+		case PHP_IO_TIMEOUT:
+			errno = ETIMEDOUT;
+			*ret = -1;
+			return true;
+		case PHP_IO_INTERRUPTED:
+			errno = EINTR;
+			*ret = -1;
+			return true;
+		case PHP_IO_CANCELLED:
+			errno = ECANCELED;
+			*ret = -1;
+			return true;
+		case PHP_IO_READY:
+		case PHP_IO_UNSUPPORTED:
+		default:
+			return false;
+	}
+}
+
+/* The descriptor ladder of section 5.5: the syscall first and the op on
+ * EAGAIN, or the op first with F_DIRECT; Ready means retry the syscall,
+ * Unsupported means syscall first from now on. */
+#define PHP_IO_DESCRIPTOR_OP(stream, fd, dl, SYSCALL, PREP) \
+	do { \
+		php_io_frame f; \
+		php_io_op op; \
+		php_io_op_result result; \
+		ssize_t ret; \
+		bool direct = (php_io_hook_flags() & PHP_IO_HOOKS_F_DIRECT) != 0; \
+		bool waited = false; \
+		php_io_frame_begin(&f, stream); \
+		memset(&op, 0, sizeof(op)); \
+		for (;;) { \
+			if (!direct) { \
+				ret = (SYSCALL); \
+				if (ret >= 0 || !PHP_IS_TRANSIENT_ERROR(errno)) { \
+					break; \
+				} \
+				if (waited && (dl)->hrtime == 0) { \
+					/* A non-blocking deadline gets one readiness check */ \
+					break; \
+				} \
+			} \
+			PREP; \
+			op.stream = (stream); \
+			if (php_io_run(&op, &result) == FAILURE) { \
+				errno = ECANCELED; \
+				ret = -1; \
+				break; \
+			} \
+			if (php_io_data_result(&result, &ret)) { \
+				break; \
+			} \
+			waited = true; \
+			if (result.status == PHP_IO_UNSUPPORTED && !direct) { \
+				errno = ENOTSUP; \
+				ret = -1; \
+				break; \
+			} \
+			direct = false; \
+		} \
+		php_io_frame_end(&f, &op); \
+		return ret; \
+	} while (0)
+
+PHPAPI ssize_t php_io_recv(php_stream *stream, php_socket_t fd, void *buf, size_t len, int flags, php_deadline *dl)
+{
+	PHP_IO_DESCRIPTOR_OP(stream, fd, dl,
+			recv(fd, buf, len, flags),
+			php_io_op_recv(&op, f.handle, fd, buf, len, flags, *dl));
+}
+
+PHPAPI ssize_t php_io_send(php_stream *stream, php_socket_t fd, const void *buf, size_t len, int flags, php_deadline *dl)
+{
+	PHP_IO_DESCRIPTOR_OP(stream, fd, dl,
+			send(fd, buf, len, flags),
+			php_io_op_send(&op, f.handle, fd, buf, len, flags, *dl));
+}
+
+PHPAPI php_socket_t php_io_accept(php_stream *stream, php_socket_t fd, struct sockaddr *addr, socklen_t *addrlen, php_deadline *dl)
+{
+	PHP_IO_DESCRIPTOR_OP(stream, fd, dl,
+			(ssize_t) accept(fd, addr, addrlen),
+			php_io_op_accept(&op, f.handle, fd, addr, addrlen, *dl));
+}
+
+/* The connect is started once; the wait completes as Ready and the result
+ * is read from SO_ERROR, or as Done when the provider connected itself */
+PHPAPI int php_io_connect(php_stream *stream, php_socket_t fd, const struct sockaddr *addr, socklen_t addrlen, php_deadline *dl)
+{
+	php_io_frame f;
+	php_io_op op;
+	php_io_op_result result;
+	int ret = 0;
+	bool direct = (php_io_hook_flags() & PHP_IO_HOOKS_F_DIRECT) != 0;
+
+	php_io_frame_begin(&f, stream);
+	memset(&op, 0, sizeof(op));
+
+	if (!direct) {
+		if (connect(fd, addr, addrlen) == 0) {
+			goto out;
+		}
+		if (errno != EINPROGRESS && errno != EAGAIN && errno != EWOULDBLOCK) {
+			ret = -1;
+			goto out;
+		}
+	}
+
+	for (;;) {
+		php_io_op_connect(&op, f.handle, fd, addr, addrlen, *dl);
+		op.stream = stream;
+		if (php_io_run(&op, &result) == FAILURE) {
+			errno = ECANCELED;
+			ret = -1;
+			break;
+		}
+		if (result.status == PHP_IO_READY) {
+			int error = 0;
+			socklen_t len = sizeof(error);
+			if (getsockopt(fd, SOL_SOCKET, SO_ERROR, (char *) &error, &len) != 0) {
+				ret = -1;
+			} else if (error) {
+				errno = error;
+				ret = -1;
+			}
+			break;
+		}
+		if (result.status == PHP_IO_UNSUPPORTED && direct) {
+			/* Start it ourselves and wait for writability instead */
+			direct = false;
+			if (connect(fd, addr, addrlen) == 0) {
+				break;
+			}
+			if (errno != EINPROGRESS && errno != EAGAIN && errno != EWOULDBLOCK) {
+				ret = -1;
+				break;
+			}
+			php_io_op_poll(&op, f.handle, fd, PHP_POLL_WRITE, *dl);
+			continue;
+		}
+		ssize_t r;
+		if (php_io_data_result(&result, &r)) {
+			ret = r < 0 ? -1 : 0;
+			break;
+		}
+		errno = ENOTSUP;
+		ret = -1;
+		break;
+	}
+
+out:
+	php_io_frame_end(&f, &op);
+	return ret;
+}
+
+/* Regular files have no readiness form: without F_FILES the call is
+ * synchronous. Pipes and character devices keep blocking descriptors, so
+ * they wait for readiness first unless the provider performs the op. */
+static ssize_t php_io_file_op(php_stream *stream, int fd, php_deadline *dl, bool regular,
+		ssize_t (*syscall_fn)(int, void *, size_t), void *buf, size_t len,
+		void (*prep)(php_io_op *, zend_object *, php_socket_t, void *, size_t, int64_t, php_deadline))
+{
+	uint32_t flags = php_io_hook_flags();
+	php_io_frame f;
+	php_io_op op;
+	php_io_op_result result;
+	ssize_t ret;
+
+	php_io_frame_begin(&f, stream);
+	memset(&op, 0, sizeof(op));
+
+	bool offload = FG(io_hooks) && (regular ? (flags & PHP_IO_HOOKS_F_FILES) : (flags & (PHP_IO_HOOKS_F_FILES | PHP_IO_HOOKS_F_DIRECT)));
+	bool ready = false;
+	for (;;) {
+		if (offload) {
+			prep(&op, f.handle, fd, buf, len, -1, *dl);
+			op.stream = stream;
+			if (php_io_run(&op, &result) == FAILURE) {
+				errno = ECANCELED;
+				ret = -1;
+				break;
+			}
+			if (php_io_data_result(&result, &ret)) {
+				break;
+			}
+			/* Ready or Unsupported: perform it here */
+			ready = result.status == PHP_IO_READY;
+			offload = false;
+		}
+		if (!regular && FG(io_hooks) && !ready) {
+			/* A blocking descriptor: wait for readiness before the syscall */
+			int n = php_io_poll(NULL, fd, prep == php_io_op_read ? PHP_POLL_READ : PHP_POLL_WRITE, dl);
+			if (n < 0) {
+				ret = -1;
+				break;
+			}
+			if (n == 0) {
+				errno = ETIMEDOUT;
+				ret = -1;
+				break;
+			}
+		}
+		do {
+			ret = syscall_fn(fd, buf, len);
+		} while (ret < 0 && errno == EINTR);
+		break;
+	}
+
+	php_io_frame_end(&f, &op);
+	return ret;
+}
+
+static ssize_t php_io_read_syscall(int fd, void *buf, size_t len)
+{
+	return read(fd, buf, len);
+}
+
+static ssize_t php_io_write_syscall(int fd, void *buf, size_t len)
+{
+	return write(fd, buf, len);
+}
+
+PHPAPI ssize_t php_io_read(php_stream *stream, int fd, void *buf, size_t len, php_deadline *dl)
+{
+	bool regular = !stream || !(stream->flags & PHP_STREAM_FLAG_NO_SEEK);
+	return php_io_file_op(stream, fd, dl, regular, php_io_read_syscall, buf, len, php_io_op_read);
+}
+
+PHPAPI ssize_t php_io_write(php_stream *stream, int fd, const void *buf, size_t len, php_deadline *dl)
+{
+	bool regular = !stream || !(stream->flags & PHP_STREAM_FLAG_NO_SEEK);
+	return php_io_file_op(stream, fd, dl, regular, php_io_write_syscall, (void *) buf, len,
+			(void (*)(php_io_op *, zend_object *, php_socket_t, void *, size_t, int64_t, php_deadline)) php_io_op_write);
+}
+
+PHPAPI int php_io_fsync(php_stream *stream, int fd, bool data_only)
+{
+	if (FG(io_hooks) && (php_io_hook_flags() & PHP_IO_HOOKS_F_FILES)) {
+		php_io_frame f;
+		php_io_op op;
+		php_io_op_result result;
+		ssize_t ret;
+
+		php_io_frame_begin(&f, stream);
+		php_io_op_fsync(&op, f.handle, fd, data_only);
+		op.stream = stream;
+		zend_result rc = php_io_run(&op, &result);
+		php_io_frame_end(&f, &op);
+		if (rc == FAILURE) {
+			errno = ECANCELED;
+			return -1;
+		}
+		if (php_io_data_result(&result, &ret)) {
+			return ret < 0 ? -1 : 0;
+		}
+	}
+#ifdef HAVE_FDATASYNC
+	return data_only ? fdatasync(fd) : fsync(fd);
+#else
+	return fsync(fd);
+#endif
 }
 
 PHPAPI zend_result php_io_sleep(php_deadline dl)

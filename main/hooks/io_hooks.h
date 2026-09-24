@@ -79,6 +79,7 @@ struct _php_io_op {
 		struct { php_io_op **ops; uint32_t n;                          /* members, caller owned */
 		         php_io_op_result *results; uint32_t n_results; } any;  /* filled on completion */
 	} u;
+	php_stream *stream;         /* the stream frozen for the op, NULL for other descriptor owners */
 	zend_object *zobj;          /* Io\Operation wrapper, created lazily for userland hooks */
 	void *provider_data;        /* provider scratch, never read by the core */
 	php_io_queue *queue;        /* set by the queue at submit, cleared at completion */
@@ -149,9 +150,28 @@ PHPAPI extern void (*php_io_op_zobj_detach)(zend_object *zobj);
 PHPAPI zend_result php_io_run(php_io_op *op, php_io_op_result *result);
 
 /* Convenience wrappers. They return like the syscall they replace, with
- * errno set. stream may be NULL for descriptors that are not streams. */
+ * errno set (ETIMEDOUT when the deadline passed, ECANCELED when the
+ * provider cancelled). stream may be NULL for descriptors that are not
+ * streams; a stream is frozen for the duration. */
 PHPAPI int php_io_poll(php_stream *stream, php_socket_t fd, uint32_t events, php_deadline *dl);  /* revents, 0 on timeout, -1 on error */
+PHPAPI ssize_t php_io_recv(php_stream *stream, php_socket_t fd, void *buf, size_t len, int flags, php_deadline *dl);
+PHPAPI ssize_t php_io_send(php_stream *stream, php_socket_t fd, const void *buf, size_t len, int flags, php_deadline *dl);
+PHPAPI ssize_t php_io_read(php_stream *stream, int fd, void *buf, size_t len, php_deadline *dl);
+PHPAPI ssize_t php_io_write(php_stream *stream, int fd, const void *buf, size_t len, php_deadline *dl);
+PHPAPI php_socket_t php_io_accept(php_stream *stream, php_socket_t fd, struct sockaddr *addr, socklen_t *addrlen, php_deadline *dl);
+PHPAPI int php_io_connect(php_stream *stream, php_socket_t fd, const struct sockaddr *addr, socklen_t addrlen, php_deadline *dl);
+PHPAPI int php_io_fsync(php_stream *stream, int fd, bool data_only);
 PHPAPI zend_result php_io_sleep(php_deadline dl);
+
+/* Active php_io_run() frames; pcntl_fork() refuses while any is in flight */
+PHPAPI uint32_t php_io_ops_in_flight(void);
+
+/* Orphans: a queue that keeps an in-flight op after its frame went away
+ * registers the stream here and unfreezes it when the op settled. A stream
+ * freed meanwhile is drained first. */
+PHPAPI void php_io_stream_orphan(php_stream *stream, php_io_queue *queue);
+PHPAPI void php_io_stream_unfreeze(php_stream *stream);
+PHPAPI void php_io_stream_drain(php_stream *stream);
 
 /* Poll with a relative timeout; NULL or tv_sec == -1 means no timeout. */
 static inline int php_io_poll_tv(php_stream *stream, php_socket_t fd, uint32_t events, const struct timeval *tv)
@@ -176,6 +196,9 @@ typedef struct _php_io_queue_ops {
 	void (*remove)(php_io_queue *q, php_io_op *op);
 	int (*wait)(php_io_queue *q, php_io_queue_completion *out, uint32_t max, const struct timespec *timeout);
 	void (*orphan)(php_io_queue *q, php_io_op *op);
+	/* Wait until every orphaned op on the stream settled, keeping other
+	 * completions for delivery. May be NULL when orphan() never keeps one. */
+	void (*drain)(php_io_queue *q, php_stream *stream);
 	uint32_t (*count_pending)(php_io_queue *q);
 	uint32_t (*hook_flags)(php_io_queue *q);
 	void (*destroy)(php_io_queue *q);
