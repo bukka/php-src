@@ -184,7 +184,9 @@ PHPAPI int php_network_getaddresses(const char *host, int socktype, struct socka
 	hints.ai_family = ipv6_borked ? AF_INET : AF_UNSPEC;
 # endif
 
-	if ((n = getaddrinfo(host, NULL, &hints, &res))) {
+	php_deadline deadline;
+	php_deadline_init_infinite(&deadline);
+	if ((n = php_io_getaddrinfo(host, NULL, &hints, &res, &deadline))) {
 # if defined(PHP_WIN32)
 		char *gai_error = php_win32_error_to_msg(n);
 # elif defined(HAVE_GAI_STRERROR)

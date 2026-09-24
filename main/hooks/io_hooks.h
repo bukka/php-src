@@ -75,6 +75,8 @@ struct _php_io_op {
 		struct { const struct sockaddr *addr; socklen_t addrlen; } connect;
 		struct { const char *node; const char *service;
 		         const struct addrinfo *hints; struct addrinfo **res; } getaddrinfo;
+		struct { const struct sockaddr *addr; socklen_t addrlen; int flags;
+		         char *host; size_t hostlen; char *service; size_t servicelen; } getnameinfo;
 		struct { bool data_only; } fsync;
 		struct { php_io_op **ops; uint32_t n;                          /* members, caller owned */
 		         php_io_op_result *results; uint32_t n_results; } any;  /* filled on completion */
@@ -96,6 +98,7 @@ PHPAPI void php_io_op_send(php_io_op *op, zend_object *handle, php_socket_t fd, 
 PHPAPI void php_io_op_accept(php_io_op *op, zend_object *handle, php_socket_t fd, struct sockaddr *addr, socklen_t *addrlen, php_deadline dl);
 PHPAPI void php_io_op_connect(php_io_op *op, zend_object *handle, php_socket_t fd, const struct sockaddr *addr, socklen_t addrlen, php_deadline dl);
 PHPAPI void php_io_op_getaddrinfo(php_io_op *op, const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res, php_deadline dl);
+PHPAPI void php_io_op_getnameinfo(php_io_op *op, const struct sockaddr *addr, socklen_t addrlen, int flags, char *host, size_t hostlen, char *service, size_t servicelen, php_deadline dl);
 PHPAPI void php_io_op_fsync(php_io_op *op, zend_object *handle, php_socket_t fd, bool data_only);
 PHPAPI void php_io_op_any(php_io_op *op, php_io_op **members, uint32_t n, php_io_op_result *results);
 
@@ -161,6 +164,10 @@ PHPAPI ssize_t php_io_write(php_stream *stream, int fd, const void *buf, size_t 
 PHPAPI php_socket_t php_io_accept(php_stream *stream, php_socket_t fd, struct sockaddr *addr, socklen_t *addrlen, php_deadline *dl);
 PHPAPI int php_io_connect(php_stream *stream, php_socket_t fd, const struct sockaddr *addr, socklen_t addrlen, php_deadline *dl);
 PHPAPI int php_io_fsync(php_stream *stream, int fd, bool data_only);
+/* Both return the EAI_* code like the library call; the result list of
+ * getaddrinfo is freed with freeaddrinfo() whoever built it */
+PHPAPI int php_io_getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res, php_deadline *dl);
+PHPAPI int php_io_getnameinfo(const struct sockaddr *addr, socklen_t addrlen, int flags, char *host, size_t hostlen, char *service, size_t servicelen, php_deadline *dl);
 PHPAPI zend_result php_io_sleep(php_deadline dl);
 
 /* Active php_io_run() frames; pcntl_fork() refuses while any is in flight */

@@ -228,6 +228,14 @@ static int32_t php_io_ring_work_getaddrinfo(ior_work_token *token, void *arg)
 			op->u.getaddrinfo.hints, op->u.getaddrinfo.res);
 }
 
+static int32_t php_io_ring_work_getnameinfo(ior_work_token *token, void *arg)
+{
+	php_io_op *op = arg;
+	return getnameinfo(op->u.getnameinfo.addr, op->u.getnameinfo.addrlen,
+			op->u.getnameinfo.host, op->u.getnameinfo.hostlen,
+			op->u.getnameinfo.service, op->u.getnameinfo.servicelen, op->u.getnameinfo.flags);
+}
+
 static int32_t php_io_ring_work_fsync(ior_work_token *token, void *arg)
 {
 	php_io_op *op = arg;
@@ -345,6 +353,13 @@ static zend_result php_io_ring_submit_one(php_io_ring *ring, php_io_ring_req *re
 			}
 			op->in_flight = true;
 			break;
+		case PHP_IO_OP_GETNAMEINFO:
+			if (ior_prep_work(ctx, sqe, php_io_ring_work_getnameinfo, op) < 0) {
+				errno = ENOTSUP;
+				return FAILURE;
+			}
+			op->in_flight = true;
+			break;
 		case PHP_IO_OP_FSYNC:
 			if (ior_prep_work(ctx, sqe, php_io_ring_work_fsync, op) < 0) {
 				errno = ENOTSUP;
@@ -352,7 +367,7 @@ static zend_result php_io_ring_submit_one(php_io_ring *ring, php_io_ring_req *re
 			}
 			break;
 		default:
-			/* GETNAMEINFO, WAITPID and SIGWAIT wait for their step */
+			/* WAITPID and SIGWAIT wait for their step */
 			errno = ENOTSUP;
 			return FAILURE;
 	}
@@ -573,7 +588,7 @@ static void php_io_ring_result_from_cqe(php_io_ring_req *req, int32_t res)
 		r->status = PHP_IO_DONE;
 		if (op && op->type == PHP_IO_OP_POLL) {
 			r->res = php_io_ring_poll_mask_from_ior((uint32_t) res);
-		} else if (op && op->type == PHP_IO_OP_GETADDRINFO && res != 0) {
+		} else if (op && (op->type == PHP_IO_OP_GETADDRINFO || op->type == PHP_IO_OP_GETNAMEINFO) && res != 0) {
 			/* EAI_* codes are the work result as they are */
 			r->error = res;
 			r->res = -1;
@@ -601,7 +616,7 @@ static void php_io_ring_result_from_cqe(php_io_ring_req *req, int32_t res)
 			r->res = -1;
 			break;
 		default:
-			if (op && op->type == PHP_IO_OP_GETADDRINFO) {
+			if (op && (op->type == PHP_IO_OP_GETADDRINFO || op->type == PHP_IO_OP_GETNAMEINFO)) {
 				r->status = PHP_IO_DONE;
 				r->error = res;      /* a negative EAI_* code */
 			} else {

@@ -16,6 +16,8 @@
 #include "ext/standard/io_poll.h"
 
 #include <errno.h>
+#include <netdb.h>
+#include <arpa/inet.h>
 #include <time.h>
 
 PHPAPI void (*php_io_op_zobj_detach)(zend_object *zobj) = NULL;
@@ -99,6 +101,18 @@ PHPAPI void php_io_op_getaddrinfo(php_io_op *op, const char *node, const char *s
 	op->u.getaddrinfo.service = service;
 	op->u.getaddrinfo.hints = hints;
 	op->u.getaddrinfo.res = res;
+}
+
+PHPAPI void php_io_op_getnameinfo(php_io_op *op, const struct sockaddr *addr, socklen_t addrlen, int flags, char *host, size_t hostlen, char *service, size_t servicelen, php_deadline dl)
+{
+	php_io_op_init(op, PHP_IO_OP_GETNAMEINFO, NULL, SOCK_ERR, 0, dl);
+	op->u.getnameinfo.addr = addr;
+	op->u.getnameinfo.addrlen = addrlen;
+	op->u.getnameinfo.flags = flags;
+	op->u.getnameinfo.host = host;
+	op->u.getnameinfo.hostlen = hostlen;
+	op->u.getnameinfo.service = service;
+	op->u.getnameinfo.servicelen = servicelen;
 }
 
 PHPAPI void php_io_op_fsync(php_io_op *op, zend_object *handle, php_socket_t fd, bool data_only)
@@ -904,6 +918,74 @@ PHPAPI int php_io_fsync(php_stream *stream, int fd, bool data_only)
 #else
 	return fsync(fd);
 #endif
+}
+
+/* DNS: always handed to a provider, which may answer from its own
+ * resolver; Unsupported means the library call */
+/* A numeric host needs no lookup and must not reach a provider */
+static bool php_io_host_is_numeric(const char *node, const struct addrinfo *hints)
+{
+	if (!node) {
+		return true;
+	}
+	if (hints && (hints->ai_flags & AI_NUMERICHOST)) {
+		return true;
+	}
+	struct in_addr in4;
+	if (inet_pton(AF_INET, node, &in4) == 1) {
+		return true;
+	}
+#ifdef HAVE_IPV6
+	struct in6_addr in6;
+	if (inet_pton(AF_INET6, node, &in6) == 1) {
+		return true;
+	}
+#endif
+	return false;
+}
+
+PHPAPI int php_io_getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res, php_deadline *dl)
+{
+	if (FG(io_hooks) && !php_io_host_is_numeric(node, hints)) {
+		php_io_op op;
+		php_io_op_result result;
+		php_io_op_getaddrinfo(&op, node, service, hints, res, *dl);
+		if (php_io_run(&op, &result) == FAILURE) {
+			return EAI_SYSTEM;
+		}
+		if (result.status == PHP_IO_DONE) {
+			return result.error;
+		}
+		if (result.status == PHP_IO_TIMEOUT) {
+			return EAI_AGAIN;
+		}
+		if (result.status == PHP_IO_CANCELLED) {
+			return EAI_SYSTEM;
+		}
+	}
+	return getaddrinfo(node, service, hints, res);
+}
+
+PHPAPI int php_io_getnameinfo(const struct sockaddr *addr, socklen_t addrlen, int flags, char *host, size_t hostlen, char *service, size_t servicelen, php_deadline *dl)
+{
+	if (FG(io_hooks)) {
+		php_io_op op;
+		php_io_op_result result;
+		php_io_op_getnameinfo(&op, addr, addrlen, flags, host, hostlen, service, servicelen, *dl);
+		if (php_io_run(&op, &result) == FAILURE) {
+			return EAI_SYSTEM;
+		}
+		if (result.status == PHP_IO_DONE) {
+			return result.error;
+		}
+		if (result.status == PHP_IO_TIMEOUT) {
+			return EAI_AGAIN;
+		}
+		if (result.status == PHP_IO_CANCELLED) {
+			return EAI_SYSTEM;
+		}
+	}
+	return getnameinfo(addr, addrlen, host, hostlen, service, servicelen, flags);
 }
 
 PHPAPI zend_result php_io_sleep(php_deadline dl)
