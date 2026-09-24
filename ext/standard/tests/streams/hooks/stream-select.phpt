@@ -1,0 +1,76 @@
+--TEST--
+IO hooks: stream_select() waits with one Any operation and reports every ready stream
+--FILE--
+<?php
+include __DIR__ . '/scheduler.inc';
+
+final class Tracing extends Scheduler
+{
+    public array $anys = [];
+
+    public function run(\Io\Operation $op): \Io\Completion
+    {
+        if ($op instanceof \Io\Operation\Any) {
+            $members = $op->getOperations();
+            $this->anys[] = count(array_filter($members, fn ($m) => $m instanceof \Io\Operation\Poll))
+                . '+' . count(array_filter($members, fn ($m) => $m instanceof \Io\Operation\Timer));
+        }
+        return parent::run($op);
+    }
+}
+
+$scheduler = new Tracing();
+Io\Hooks\set_hooks($scheduler);
+
+[$a, $b] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
+[$c, $d] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
+
+$scheduler->spawn(function () use ($a, $c) {
+    // Nothing readable yet: the select times out
+    $r = [$a, $c]; $w = null; $e = null;
+    $start = hrtime(true);
+    var_dump(stream_select($r, $w, $e, 0, 50000), $r);
+    var_dump((hrtime(true) - $start) / 1e6 >= 40);
+
+    // Both readable by now: both reported, the writable side too
+    usleep(60000);
+    $r = [$a, $c]; $w = [$a]; $e = null;
+    var_dump(stream_select($r, $w, $e, 1), count($r), $w === [$a]);
+    var_dump(fread($a, 10), fread($c, 10));
+
+    // Blocking select woken by the other fiber
+    $r = [$a]; $w = null; $e = null;
+    var_dump(stream_select($r, $w, $e, null), $r === [$a], fread($a, 10));
+});
+$scheduler->spawn(function () use ($b, $d) {
+    usleep(70000);
+    fwrite($b, "one");
+    fwrite($d, "two");
+    usleep(50000);
+    fwrite($b, "three");
+});
+$scheduler->loop();
+Io\Hooks\set_hooks(null);
+var_dump($scheduler->anys);
+?>
+--EXPECT--
+int(0)
+array(0) {
+}
+bool(true)
+int(3)
+int(2)
+bool(true)
+string(3) "one"
+string(3) "two"
+int(1)
+bool(true)
+string(5) "three"
+array(3) {
+  [0]=>
+  string(3) "2+1"
+  [1]=>
+  string(3) "2+1"
+  [2]=>
+  string(3) "1+0"
+}
