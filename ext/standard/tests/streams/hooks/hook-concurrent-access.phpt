@@ -1,5 +1,5 @@
 --TEST--
-IO hooks: concurrent stream access from run() is rejected
+IO hooks: concurrent stream access from run() is rejected, the read arrives as a Recv
 --FILE--
 <?php
 
@@ -15,7 +15,7 @@ class ConcurrentHook implements Io\Hooks\Hooks {
         } catch (Error $e) {
             echo $e->getMessage() . "\n";
         }
-        var_dump($op instanceof Io\Operation\Poll, $op->getEvents(), $op->getTimeout());
+        var_dump($op instanceof Io\Operation\Recv, $op->getEvents(), $op->getTimeout());
         return $op->complete(Io\CompletionStatus::Timeout);
     }
     public function add(Io\Operation $op): void {}

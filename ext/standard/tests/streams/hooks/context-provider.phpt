@@ -32,8 +32,10 @@ final class ContextProvider implements \Io\Hooks\Hooks
         }
         $this->waiting++;
         [$i, $triggered] = \Fiber::suspend();
-        foreach ($watchers as $j => $w) {
-            if ($j !== $i && $w->isActive()) {
+        // A fired one-shot watcher stays registered and disarmed, so every
+        // watcher of this await goes, or the next await on the handle is refused
+        foreach ($watchers as $w) {
+            if ($w->isActive()) {
                 $w->remove();
             }
         }
