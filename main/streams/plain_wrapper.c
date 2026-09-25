@@ -1327,6 +1327,26 @@ static php_stream *php_plain_files_dir_opener(php_stream_wrapper *wrapper, const
 }
 /* }}} */
 
+#ifdef PHP_WIN32
+/* The device namespace (named pipes, consoles, serial ports) holds no disk
+ * files, and opening a pipe twice to test it would take a second instance */
+static bool php_stdiop_win32_may_overlap(const char *path, int open_flags)
+{
+	if (open_flags & (O_APPEND | _O_TEXT)) {
+		return false;
+	}
+	if (IS_SLASH(path[0]) && IS_SLASH(path[1]) && path[2] != '\0' && IS_SLASH(path[3])) {
+		if (path[2] == '.') {
+			return false;
+		}
+		if (path[2] == '?' && strncasecmp(path + 4, "pipe", 4) == 0 && IS_SLASH(path[8])) {
+			return false;
+		}
+	}
+	return true;
+}
+#endif
+
 /* {{{ php_stream_fopen */
 PHPAPI php_stream *_php_stream_fopen(const char *filename, const char *mode, zend_string **opened_path, int options STREAMS_DC)
 {
@@ -1370,12 +1390,17 @@ PHPAPI php_stream *_php_stream_fopen(const char *filename, const char *mode, zen
 	/* While hooks are installed a file is opened overlapped, so that a
 	 * completion provider can perform its reads and writes (IOCP completes
 	 * nothing on a synchronous handle). Append mode keeps the CRT path: an
-	 * overlapped write has no current position to append at. A device that
-	 * refuses the flag is opened the usual way. */
-	bool overlapped = FG(io_hooks) != NULL && !(open_flags & O_APPEND);
+	 * overlapped write has no current position to append at. Text mode
+	 * needs the CRT's newline translation. Only disk files: anything that
+	 * refuses the flag or is not one is opened the usual way. */
+	bool overlapped = FG(io_hooks) != NULL && php_stdiop_win32_may_overlap(realpath, open_flags);
 	fd = -1;
 	if (overlapped) {
 		fd = php_win32_ioutil_open(realpath, open_flags | PHP_WIN32_IOUTIL_O_OVERLAPPED, 0666);
+		if (fd != -1 && GetFileType((HANDLE) _get_osfhandle(fd)) != FILE_TYPE_DISK) {
+			close(fd);
+			fd = -1;
+		}
 		overlapped = fd != -1;
 	}
 	if (fd == -1) {
