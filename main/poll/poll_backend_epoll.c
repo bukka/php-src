@@ -192,13 +192,22 @@ static int epoll_backend_wait(
 		backend_data->events_capacity = max_events;
 	}
 
-	int nfds;
+	int nfds = -1;
 #ifdef HAVE_EPOLL_PWAIT2
-	nfds = epoll_pwait2(backend_data->epoll_fd, backend_data->events, max_events, timeout, NULL);
-#else
-	int timeout_ms = php_poll_timespec_to_ms(timeout);
-	nfds = epoll_wait(backend_data->epoll_fd, backend_data->events, max_events, timeout_ms);
+	/* The kernel (or a seccomp filter, or valgrind) may not have it */
+	static bool epoll_pwait2_missing = false;
+	if (!epoll_pwait2_missing) {
+		nfds = epoll_pwait2(backend_data->epoll_fd, backend_data->events, max_events, timeout, NULL);
+		if (nfds < 0 && errno == ENOSYS) {
+			epoll_pwait2_missing = true;
+		}
+	}
+	if (epoll_pwait2_missing)
 #endif
+	{
+		int timeout_ms = php_poll_timespec_to_ms(timeout);
+		nfds = epoll_wait(backend_data->epoll_fd, backend_data->events, max_events, timeout_ms);
+	}
 
 	if (nfds > 0) {
 		for (int i = 0; i < nfds; i++) {
