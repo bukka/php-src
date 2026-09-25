@@ -199,7 +199,8 @@ PHPAPI void php_io_freeaddrinfo(struct addrinfo *res);
 PHPAPI void php_io_addrinfo_register(struct addrinfo *head);
 PHPAPI void php_io_addrinfo_free_list(struct addrinfo *head);
 PHPAPI int php_io_getnameinfo(const struct sockaddr *addr, socklen_t addrlen, int flags, char *host, size_t hostlen, char *service, size_t servicelen, php_deadline *dl);
-PHPAPI zend_result php_io_sleep(php_deadline dl);
+/* FAILURE when cancelled; *interrupted (may be NULL) tells a signal ended it early */
+PHPAPI zend_result php_io_sleep(php_deadline dl, bool *interrupted);
 /* Like waitpid(2) and sigtimedwait(2); a timed out signal wait fails with EAGAIN */
 PHPAPI pid_t php_io_waitpid(zend_object *handle, pid_t pid, int *status, int options, php_deadline *dl);
 PHPAPI int php_io_sigwait(zend_object *handle, const php_sigset_t *set, php_siginfo_t *info, php_deadline *dl);

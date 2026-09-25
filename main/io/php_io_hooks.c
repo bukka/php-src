@@ -583,36 +583,36 @@ static php_io_queue *php_io_core_queue(void)
 
 static zend_result php_io_run_sync_timer(php_io_op *op, php_io_op_result *result)
 {
+	bool infinite = php_deadline_is_infinite(&op->deadline);
+
 	result->index = 0;
 	result->res = 0;
 	result->error = 0;
-
-	if (php_deadline_is_infinite(&op->deadline)) {
-		/* A timer that never fires has no synchronous meaning */
-		result->status = PHP_IO_UNSUPPORTED;
-		return SUCCESS;
-	}
+	result->status = PHP_IO_DONE;
 
 	for (;;) {
-		zend_hrtime_t remaining = php_io_deadline_remaining(&op->deadline, zend_hrtime());
+		zend_hrtime_t remaining = infinite ? ZEND_HRTIME_T_MAX : php_io_deadline_remaining(&op->deadline, zend_hrtime());
 		if (remaining == 0) {
 			break;
 		}
 #ifdef PHP_WIN32
-		Sleep((DWORD) ((remaining + 999999) / 1000000));
-		break;
+		zend_hrtime_t ms = (remaining + 999999) / 1000000;
+		Sleep(ms >= INFINITE ? INFINITE - 1 : (DWORD) ms);
 #else
+		zend_hrtime_t sec = remaining / ZEND_NANO_IN_SEC;
 		struct timespec ts = {
-			.tv_sec = remaining / ZEND_NANO_IN_SEC,
-			.tv_nsec = remaining % ZEND_NANO_IN_SEC,
+			.tv_sec = sec > INT_MAX ? INT_MAX : (time_t) sec,
+			.tv_nsec = sec > INT_MAX ? 0 : (long) (remaining % ZEND_NANO_IN_SEC),
 		};
-		if (nanosleep(&ts, NULL) == 0 || errno != EINTR) {
+		if (nanosleep(&ts, NULL) != 0) {
+			if (errno == EINTR) {
+				result->status = PHP_IO_INTERRUPTED;
+			}
 			break;
 		}
 #endif
 	}
 
-	result->status = PHP_IO_DONE;
 	return SUCCESS;
 }
 
@@ -1399,11 +1399,15 @@ PHPAPI int php_io_sigwait(zend_object *handle, const php_sigset_t *set, php_sigi
 }
 #endif
 
-PHPAPI zend_result php_io_sleep(php_deadline dl)
+PHPAPI zend_result php_io_sleep(php_deadline dl, bool *interrupted)
 {
 	php_io_op op;
 	php_io_op_result result;
 
 	php_io_op_timer(&op, dl);
-	return php_io_run(&op, &result);
+	zend_result rc = php_io_run(&op, &result);
+	if (interrupted) {
+		*interrupted = rc == SUCCESS && result.status == PHP_IO_INTERRUPTED;
+	}
+	return rc;
 }

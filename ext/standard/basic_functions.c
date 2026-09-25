@@ -1130,6 +1130,23 @@ PHP_FUNCTION(flush)
 }
 /* }}} */
 
+/* Sleeps for ns nanoseconds; FAILURE when cancelled. *elapsed is the time
+ * slept when a signal interrupted the sleep, 0 when it completed. */
+static zend_result php_sleep_ns(zend_hrtime_t ns, zend_hrtime_t *elapsed)
+{
+	zend_hrtime_t start = zend_hrtime();
+	bool interrupted;
+
+	*elapsed = 0;
+	if (php_io_sleep(php_io_deadline_from_ns(ns), &interrupted) == FAILURE) {
+		return FAILURE;
+	}
+	if (interrupted) {
+		*elapsed = MAX(zend_hrtime() - start, 1);
+	}
+	return SUCCESS;
+}
+
 /* {{{ Delay for a given number of seconds */
 PHP_FUNCTION(sleep)
 {
@@ -1149,11 +1166,16 @@ PHP_FUNCTION(sleep)
 		RETURN_THROWS();
 	}
 
-	if (php_io_sleep(php_io_deadline_from_ns((zend_hrtime_t) num * ZEND_NANO_IN_SEC)) == FAILURE) {
+	zend_hrtime_t ns = (zend_hrtime_t) num * ZEND_NANO_IN_SEC, elapsed;
+	if (php_sleep_ns(ns, &elapsed) == FAILURE) {
 		RETURN_THROWS();
 	}
+	if (elapsed == 0 || elapsed >= ns) {
+		RETURN_LONG(0);
+	}
 
-	RETURN_LONG(0);
+	/* The seconds left, rounded like sleep(3) */
+	RETURN_LONG((zend_long) ((ns - elapsed + ZEND_NANO_IN_SEC / 2) / ZEND_NANO_IN_SEC));
 }
 /* }}} */
 
@@ -1171,7 +1193,8 @@ PHP_FUNCTION(usleep)
 		RETURN_THROWS();
 	}
 
-	if (php_io_sleep(php_io_deadline_from_ns((zend_hrtime_t) num * 1000)) == FAILURE) {
+	zend_hrtime_t elapsed;
+	if (php_sleep_ns((zend_hrtime_t) num * 1000, &elapsed) == FAILURE) {
 		RETURN_THROWS();
 	}
 }
@@ -1201,11 +1224,28 @@ PHP_FUNCTION(time_nanosleep)
 		RETURN_THROWS();
 	}
 
-	if (php_io_sleep(php_io_deadline_from_ns((zend_hrtime_t) tv_sec * ZEND_NANO_IN_SEC + tv_nsec)) == FAILURE) {
+	zend_hrtime_t ns = (zend_ulong) tv_sec >= (ZEND_HRTIME_T_MAX - tv_nsec) / ZEND_NANO_IN_SEC
+			? ZEND_HRTIME_T_MAX : (zend_hrtime_t) tv_sec * ZEND_NANO_IN_SEC + tv_nsec;
+	zend_hrtime_t elapsed;
+	if (php_sleep_ns(ns, &elapsed) == FAILURE) {
 		RETURN_THROWS();
 	}
+	if (elapsed == 0) {
+		RETURN_TRUE;
+	}
 
-	RETURN_TRUE;
+	zend_long rem_sec = tv_sec - (zend_long) (elapsed / ZEND_NANO_IN_SEC);
+	zend_long rem_nsec = tv_nsec - (zend_long) (elapsed % ZEND_NANO_IN_SEC);
+	if (rem_nsec < 0) {
+		rem_nsec += ZEND_NANO_IN_SEC;
+		rem_sec--;
+	}
+	if (rem_sec < 0) {
+		rem_sec = rem_nsec = 0;
+	}
+	array_init(return_value);
+	add_assoc_long_ex(return_value, "seconds", sizeof("seconds")-1, rem_sec);
+	add_assoc_long_ex(return_value, "nanoseconds", sizeof("nanoseconds")-1, rem_nsec);
 }
 /* }}} */
 
@@ -1240,9 +1280,13 @@ PHP_FUNCTION(time_sleep_until)
 
 	diff_ns = target_ns - current_ns;
 
-	if (php_io_sleep(php_io_deadline_from_ns((zend_hrtime_t) diff_ns)) == FAILURE) {
-		RETURN_THROWS();
-	}
+	php_deadline dl = php_io_deadline_from_ns((zend_hrtime_t) diff_ns);
+	bool interrupted;
+	do {
+		if (php_io_sleep(dl, &interrupted) == FAILURE) {
+			RETURN_THROWS();
+		}
+	} while (interrupted);
 
 	RETURN_TRUE;
 }
