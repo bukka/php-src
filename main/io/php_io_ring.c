@@ -1750,10 +1750,10 @@ PHPAPI php_io_ring *php_io_queue_ring(php_io_queue *q)
 
 PHPAPI php_io_queue *php_io_queue_create_ring(uint32_t entries)
 {
-	/* No IOR_SETUP_FD_NONBLOCK: a userland Io\Ring\Engine may be handed a
-	 * blocking stream, which the thread backend then makes non-blocking
-	 * itself so that the op waits on its poller and stays cancellable */
-	php_io_ring *ring = php_io_ring_create(entries, false);
+	/* Ops come only from the core, which makes every descriptor it submits
+	 * non-blocking: sockets, accepted ones included, and unseekable plain
+	 * files; regular files run to completion either way */
+	php_io_ring *ring = php_io_ring_create(entries, true);
 	if (!ring) {
 		return NULL;
 	}

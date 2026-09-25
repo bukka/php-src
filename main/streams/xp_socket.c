@@ -1038,6 +1038,8 @@ static inline int php_tcp_sockop_accept(php_stream *stream, php_netstream_data_t
 		clisockdata->socket = clisock;
 		clisockdata->is_blocked = true;
 		php_netstream_set_nonblocking(clisockdata);
+		/* accepted by us, non-blocking already when the ring accepted it */
+		clisockdata->restore_blocking = true;
 
 		xparam->outputs.client = php_stream_alloc_rel(stream->ops, clisockdata, NULL, "r+");
 		if (xparam->outputs.client) {
