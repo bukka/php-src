@@ -144,9 +144,12 @@ typedef struct {
 	unsigned no_forced_fstat:1;  /* Use fstat cache even if forced */
 	unsigned is_seekable:1;		/* don't try and seek, if not set */
 	unsigned is_overlapped:1;	/* Windows: opened FILE_FLAG_OVERLAPPED, read and written at 'position' */
-	unsigned _reserved:25;
+	unsigned nonblock_ours:1;	/* O_NONBLOCK set by the stream for the IO hooks, still a blocking stream */
+	unsigned _reserved:24;
 #ifdef PHP_WIN32
 	zend_off_t position;	/* the offset the next read or write of an overlapped file uses */
+#else
+	pid_t nonblock_pid;		/* the process that set it, the only one to restore it */
 #endif
 
 	int lock_flag;			/* stores the lock state */
@@ -461,6 +464,52 @@ PHPAPI php_stream *_php_stream_popen(const char *command, const char *mode STREA
 }
 #endif
 
+#ifndef PHP_WIN32
+/* An unseekable descriptor becomes non-blocking once the IO hooks see it, as
+ * the ring expects; the deadline carries the stream's mode, a non-blocking
+ * one leaves it to the kernel */
+static php_deadline php_stdiop_io_deadline(php_stream *stream, php_stdio_stream_data *data)
+{
+	php_deadline dl;
+	php_deadline_init_infinite(&dl);
+#ifdef O_NONBLOCK
+	if (!(stream->flags & PHP_STREAM_FLAG_NO_SEEK) || data->nonblock_ours) {
+		return dl;
+	}
+	if (!php_io_hooks_active()) {
+		php_deadline_init_nonblock(&dl);
+		return dl;
+	}
+	int flags = fcntl(data->fd, F_GETFL);
+	if (flags == -1) {
+		return dl;
+	}
+	if (flags & O_NONBLOCK) {
+		php_deadline_init_nonblock(&dl);
+	} else if (fcntl(data->fd, F_SETFL, flags | O_NONBLOCK) == 0) {
+		data->nonblock_ours = 1;
+		data->nonblock_pid = getpid();
+	}
+#endif
+	return dl;
+}
+
+static void php_stdiop_restore_blocking(php_stdio_stream_data *data)
+{
+#ifdef O_NONBLOCK
+	int fd;
+	PHP_STDIOP_GET_FD(fd, data);
+	if (data->nonblock_ours && fd >= 0 && data->nonblock_pid == getpid()) {
+		int flags = fcntl(fd, F_GETFL);
+		if (flags != -1 && (flags & O_NONBLOCK)) {
+			fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+		}
+	}
+#endif
+	data->nonblock_ours = 0;
+}
+#endif
+
 static ssize_t php_stdiop_write(php_stream *stream, const char *buf, size_t count)
 {
 	php_stdio_stream_data *data = (php_stdio_stream_data*)stream->abstract;
@@ -481,8 +530,7 @@ static ssize_t php_stdiop_write(php_stream *stream, const char *buf, size_t coun
 			bytes_written = _write(data->fd, buf, PLAIN_WRAP_BUF_SIZE(count));
 		}
 #else
-		php_deadline deadline;
-		php_deadline_init_infinite(&deadline);
+		php_deadline deadline = php_stdiop_io_deadline(stream, data);
 		bytes_written = php_io_write(stream, data->fd, buf, count, &deadline);
 #endif
 		if (bytes_written < 0) {
@@ -575,8 +623,7 @@ static ssize_t php_stdiop_read(php_stream *stream, char *buf, size_t count)
 			}
 		}
 #else
-		php_deadline deadline;
-		php_deadline_init_infinite(&deadline);
+		php_deadline deadline = php_stdiop_io_deadline(stream, data);
 		ret = php_io_read(stream, data->fd, buf, PLAIN_WRAP_BUF_SIZE(count), &deadline);
 #endif
 
@@ -644,6 +691,10 @@ static int php_stdiop_close(php_stream *stream, int close_handle)
 		CloseHandle(data->file_mapping);
 		data->file_mapping = NULL;
 	}
+#endif
+
+#ifndef PHP_WIN32
+	php_stdiop_restore_blocking(data);
 #endif
 
 	if (close_handle) {
@@ -911,8 +962,11 @@ static int php_stdiop_set_option(php_stream *stream, int option, int value, void
 			if (fd == -1)
 				return -1;
 #ifdef O_NONBLOCK
+			if (value && data->nonblock_ours) {
+				return 1;
+			}
 			flags = fcntl(fd, F_GETFL, 0);
-			oldval = (flags & O_NONBLOCK) ? 0 : 1;
+			oldval = (flags & O_NONBLOCK) && !data->nonblock_ours ? 0 : 1;
 			if (value)
 				flags &= ~O_NONBLOCK;
 			else
@@ -920,6 +974,7 @@ static int php_stdiop_set_option(php_stream *stream, int option, int value, void
 
 			if (-1 == fcntl(fd, F_SETFL, flags))
 				return -1;
+			data->nonblock_ours = 0;
 			return oldval;
 #else
 			return -1; /* not yet implemented */
@@ -1218,7 +1273,7 @@ static int php_stdiop_set_option(php_stream *stream, int option, int value, void
 			flags = fcntl(fd, F_GETFL, 0);
 
 			add_assoc_bool((zval*)ptrparam, "timed_out", 0);
-			add_assoc_bool((zval*)ptrparam, "blocked", (flags & O_NONBLOCK)? 0 : 1);
+			add_assoc_bool((zval*)ptrparam, "blocked", (flags & O_NONBLOCK) && !data->nonblock_ours ? 0 : 1);
 			add_assoc_bool((zval*)ptrparam, "eof", stream->eof);
 
 			return PHP_STREAM_OPTION_RETURN_OK;

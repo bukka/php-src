@@ -1324,9 +1324,10 @@ out:
 }
 
 /* Regular files have no readiness form: without F_FILES the call is
- * synchronous. Pipes and character devices keep blocking descriptors, so
- * they wait for readiness first unless the provider performs the op; one
- * the stream made non-blocking gets the plain syscall and never waits. */
+ * synchronous. Other descriptors follow the deadline: a non-blocking one is
+ * the plain syscall, else they wait for readiness unless the provider
+ * performs the op, and wait again on EAGAIN from a descriptor the stream
+ * made non-blocking. */
 static ssize_t php_io_file_op(php_stream *stream, int fd, php_deadline *dl, bool regular,
 		ssize_t (*syscall_fn)(int, void *, size_t, int64_t), void *buf, size_t len, int64_t offset,
 		void (*prep)(php_io_op *, zend_object *, php_socket_t, void *, size_t, int64_t, php_deadline))
@@ -1342,16 +1343,10 @@ static ssize_t php_io_file_op(php_stream *stream, int fd, php_deadline *dl, bool
 	}
 	memset(&op, 0, sizeof(op));
 
-	bool nonblock = false;
-#if !defined(PHP_WIN32) && defined(O_NONBLOCK)
-	if (!regular && FG(io_hooks)) {
-		int fl = fcntl(fd, F_GETFL);
-		nonblock = fl >= 0 && (fl & O_NONBLOCK);
-	}
-#endif
+	bool nonblock = !regular && dl->hrtime == 0;
 	bool offload = FG(io_hooks) && !nonblock
 			&& (regular ? (flags & PHP_IO_HOOKS_F_FILES) : (flags & (PHP_IO_HOOKS_F_FILES | PHP_IO_HOOKS_F_DIRECT)));
-	bool ready = nonblock;
+	bool ready = nonblock || !FG(io_hooks);
 	for (;;) {
 		if (offload) {
 			prep(&op, f.handle, fd, buf, len, offset, *dl);
@@ -1364,16 +1359,20 @@ static ssize_t php_io_file_op(php_stream *stream, int fd, php_deadline *dl, bool
 				ret = -1;
 				break;
 			}
+			offload = false;
 			if (php_io_data_result(&result, &ret)) {
+				if (ret < 0 && !regular && PHP_IS_TRANSIENT_ERROR(errno)) {
+					ready = false;
+					continue;
+				}
 				break;
 			}
 			/* Ready or Unsupported: perform it here */
 			ready = result.status == PHP_IO_READY;
-			offload = false;
 		}
-		if (!regular && FG(io_hooks) && !ready) {
-			/* A blocking descriptor: wait for readiness before the syscall,
-			 * with the stream's identity so a handle keyed provider can */
+		if (!regular && !ready) {
+			/* Wait for readiness before the syscall, with the stream's
+			 * identity so a handle keyed provider can */
 			uint32_t events = prep == php_io_op_read ? PHP_POLL_READ : PHP_POLL_WRITE;
 			php_io_op_poll(&op, f.handle, fd, events, *dl);
 			op.stream = stream;
@@ -1397,6 +1396,10 @@ static ssize_t php_io_file_op(php_stream *stream, int fd, php_deadline *dl, bool
 		if (ret < 0 && errno == EINTR) {
 			/* Retried once; a second signal is left to the script */
 			ret = syscall_fn(fd, buf, len, offset);
+		}
+		if (ret < 0 && !regular && !nonblock && PHP_IS_TRANSIENT_ERROR(errno)) {
+			ready = false;
+			continue;
 		}
 		break;
 	}
