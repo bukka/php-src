@@ -731,6 +731,56 @@ static void stream_array_collect_members(HashTable *stream_array, uint32_t event
 	} ZEND_HASH_FOREACH_END();
 }
 
+/* The wait is an op on every stream of the sets: each is frozen once for
+ * its duration, and kept alive */
+static bool stream_array_freeze(HashTable *stream_array, php_stream ***frozen, uint32_t *n, uint32_t *cap)
+{
+	zval *elem;
+	php_stream *stream;
+
+	ZEND_HASH_FOREACH_VAL(stream_array, elem) {
+		ZVAL_DEREF(elem);
+		php_stream_from_zval_no_verify(stream, elem);
+		if (stream == NULL) {
+			continue;
+		}
+		bool seen = false;
+		for (uint32_t i = 0; i < *n; i++) {
+			if ((*frozen)[i] == stream) {
+				seen = true;
+				break;
+			}
+		}
+		if (seen) {
+			continue;
+		}
+		if (stream->flags & PHP_STREAM_FLAG_IN_USE) {
+			zend_throw_error(NULL, "Concurrent access to a stream");
+			return false;
+		}
+		if (*n == *cap) {
+			*cap = *cap ? *cap * 2 : 8;
+			*frozen = safe_erealloc(*frozen, *cap, sizeof(**frozen), 0);
+		}
+		stream->flags |= PHP_STREAM_FLAG_IN_USE;
+		GC_ADDREF(stream->res);
+		(*frozen)[(*n)++] = stream;
+	} ZEND_HASH_FOREACH_END();
+	return true;
+}
+
+static void stream_select_unfreeze(php_stream **frozen, uint32_t n)
+{
+	for (uint32_t i = 0; i < n; i++) {
+		zend_resource *res = frozen[i]->res;
+		frozen[i]->flags &= ~PHP_STREAM_FLAG_IN_USE;
+		zend_list_delete(res);
+	}
+	if (frozen) {
+		efree(frozen);
+	}
+}
+
 /* Returns the number of ready descriptors, 0 on timeout, -1 with errno */
 static int stream_select_any(zval *r_array, zval *w_array, zval *e_array, struct timeval *tv,
 		fd_set *rfds, fd_set *wfds, fd_set *efds)
@@ -738,6 +788,16 @@ static int stream_select_any(zval *r_array, zval *w_array, zval *e_array, struct
 	php_select_member *members = NULL;
 	uint32_t n = 0, cap = 0;
 	bool priority = php_poll_backend_supports_priority(PHP_POLL_BACKEND_AUTO);
+	php_stream **frozen = NULL;
+	uint32_t n_frozen = 0, frozen_cap = 0;
+
+	if ((r_array && !stream_array_freeze(Z_ARRVAL_P(r_array), &frozen, &n_frozen, &frozen_cap))
+			|| (w_array && !stream_array_freeze(Z_ARRVAL_P(w_array), &frozen, &n_frozen, &frozen_cap))
+			|| (e_array && !stream_array_freeze(Z_ARRVAL_P(e_array), &frozen, &n_frozen, &frozen_cap))) {
+		stream_select_unfreeze(frozen, n_frozen);
+		errno = ECANCELED;
+		return -1;
+	}
 
 	if (r_array) {
 		stream_array_collect_members(Z_ARRVAL_P(r_array), PHP_POLL_READ, &members, &n, &cap);
@@ -827,6 +887,7 @@ static int stream_select_any(zval *r_array, zval *w_array, zval *e_array, struct
 	if (members) {
 		efree(members);
 	}
+	stream_select_unfreeze(frozen, n_frozen);
 	return ret;
 }
 
@@ -1041,6 +1102,9 @@ PHP_FUNCTION(stream_select)
 	}
 	php_stream_error_operation_end(context);
 
+	if (retval == -1 && EG(exception)) {
+		RETURN_THROWS();
+	}
 	if (retval == -1) {
 		php_error_docref(NULL, E_WARNING, "Unable to select [%d]: %s (max_fd=" PHP_SOCKET_FMT ")",
 				errno, strerror(errno), max_fd);
