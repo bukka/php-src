@@ -229,10 +229,10 @@ static bool eventport_associate_callback(int fd, php_poll_fd_entry *entry, void 
 {
 	eventport_associate_ctx *assoc_ctx = (eventport_associate_ctx *) user_data;
 
-	/* Only associate if marked as needing association */
-	if (entry->last_revents == EVENTPORT_NEEDS_ASSOC) {
-		int native_events = eventport_events_to_native(entry->events);
-
+	/* Only associate if marked as needing association; with no events the
+	 * port would still report hangups and errors, so it waits for a modify */
+	int native_events = eventport_events_to_native(entry->events);
+	if (entry->last_revents == EVENTPORT_NEEDS_ASSOC && native_events != 0) {
 		if (port_associate(assoc_ctx->backend_data->port_fd, PORT_SOURCE_FD, fd, native_events,
 					entry->data)
 				== -1) {

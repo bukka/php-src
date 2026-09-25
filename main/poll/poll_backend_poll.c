@@ -254,17 +254,16 @@ static int poll_backend_wait(
 		if (pfd->revents != 0) {
 			php_poll_fd_entry *entry = php_poll_fd_table_find(backend_data->fd_table, pfd->fd);
 			if (entry) {
-				/* Handle POLLNVAL by automatically removing the invalid FD */
-				if (pfd->revents & POLLNVAL) {
-					php_poll_fd_table_remove(backend_data->fd_table, pfd->fd);
-					continue; /* Don't report this event */
-				}
-
 				events[event_count].fd = pfd->fd;
 				events[event_count].events = entry->events;
 				events[event_count].revents = poll_events_from_native(pfd->revents);
 				events[event_count].data = entry->data;
 				event_count++;
+				if (pfd->revents & POLLNVAL) {
+					/* Not an open descriptor: reported once as an error, then
+					 * disarmed like a fired one-shot until it is modified */
+					entry->events = 0;
+				}
 			}
 		}
 	}

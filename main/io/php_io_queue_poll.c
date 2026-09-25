@@ -15,12 +15,13 @@
  * completes as Ready for its ready_events. Timer ops and op deadlines are
  * timers of the context. Ops without a descriptor complete as Unsupported.
  *
- * The context keeps exactly one registration per descriptor and the queue
+ * The context keeps at most one registration per descriptor and the queue
  * multiplexes interest over it: its armed events are the union of the
  * submitted ops' events, re-armed at submit and withdrawn at completion or
- * cancel, so a retained registration nobody is waiting on contributes
- * nothing. A persistent op's add() and remove() bracket the registration;
- * between runs it stays disarmed. */
+ * cancel. A registration nobody is waiting on is taken out of the context,
+ * since epoll reports hangups and errors even with no events armed. A
+ * persistent op's add() and remove() bracket the queue's record of the
+ * descriptor; between runs it is not in the context. */
 
 #include "php.h"
 #include "main/php_io_hooks.h"
@@ -38,6 +39,8 @@ struct _php_io_poll_fdreg {
 	int fd;
 	uint32_t armed;             /* events registered in the context */
 	bool in_ctx;
+	bool stale;                 /* a removal from the context failed, see fdreg_leave() */
+	bool dead;                  /* dropped while stale */
 	uint32_t n_retained;        /* persistent registrations, add() minus remove() */
 	php_io_poll_req *reqs;      /* submitted ops on the descriptor */
 };
@@ -65,6 +68,7 @@ typedef struct {
 	php_io_queue base;
 	php_poll_ctx *ctx;
 	HashTable fdregs;           /* fd -> php_io_poll_fdreg */
+	HashTable dead;             /* registrations the context may still report */
 	uint32_t n_armed;           /* registrations with events armed */
 	php_io_poll_req *outstanding;
 	uint32_t pending;
@@ -130,21 +134,46 @@ static php_io_poll_fdreg *php_io_poll_fdreg_get(php_io_poll_queue *q, int fd, bo
 	return reg;
 }
 
-static void php_io_poll_fdreg_drop(php_io_poll_queue *q, php_io_poll_fdreg *reg)
+static void php_io_poll_fdreg_set_armed(php_io_poll_queue *q, php_io_poll_fdreg *reg, uint32_t armed)
+{
+	if (!reg->armed && armed) {
+		q->n_armed++;
+	} else if (reg->armed && !armed) {
+		q->n_armed--;
+	}
+	reg->armed = armed;
+}
+
+/* Out of the context. The removal fails when the descriptor was closed
+ * while registered, or its number reused: epoll keeps the entry as long as
+ * another descriptor refers to the old file, and may still report it. */
+static void php_io_poll_fdreg_leave(php_io_poll_queue *q, php_io_poll_fdreg *reg)
 {
 	if (reg->in_ctx) {
-		php_poll_remove(q->ctx, reg->fd);
-		if (reg->armed) {
-			q->n_armed--;
+		if (php_poll_remove(q->ctx, reg->fd) != SUCCESS) {
+			reg->stale = true;
 		}
+		reg->in_ctx = false;
 	}
+	php_io_poll_fdreg_set_armed(q, reg, 0);
+}
+
+static void php_io_poll_fdreg_drop(php_io_poll_queue *q, php_io_poll_fdreg *reg)
+{
+	php_io_poll_fdreg_leave(q, reg);
 	zend_hash_index_del(&q->fdregs, (zend_ulong) reg->fd);
-	efree(reg);
+	if (!reg->stale) {
+		efree(reg);
+	} else {
+		/* Kept so that a late report finds it, and ignored */
+		reg->dead = true;
+		zend_hash_index_add_new_ptr(&q->dead, (zend_ulong) (uintptr_t) reg, reg);
+	}
 }
 
 /* Bring the context's interest in line with the submitted ops. On failure
- * the error is left in the context and the registration is unchanged. */
-static zend_result php_io_poll_fdreg_sync(php_io_poll_queue *q, php_io_poll_fdreg *reg)
+ * *err says why and the registration is out of the context. */
+static zend_result php_io_poll_fdreg_sync(php_io_poll_queue *q, php_io_poll_fdreg *reg, php_poll_error *err)
 {
 	uint32_t wanted = 0;
 	for (php_io_poll_req *r = reg->reqs; r; r = r->fd_next) {
@@ -155,25 +184,26 @@ static zend_result php_io_poll_fdreg_sync(php_io_poll_queue *q, php_io_poll_fdre
 		php_io_poll_fdreg_drop(q, reg);
 		return SUCCESS;
 	}
+	if (!wanted) {
+		php_io_poll_fdreg_leave(q, reg);
+		return SUCCESS;
+	}
+	if (reg->in_ctx && wanted == reg->armed) {
+		return SUCCESS;
+	}
+	if (reg->in_ctx && php_poll_modify(q->ctx, reg->fd, wanted, reg) != SUCCESS) {
+		*err = php_poll_get_error(q->ctx);
+		php_io_poll_fdreg_leave(q, reg);
+		return FAILURE;
+	}
 	if (!reg->in_ctx) {
-		if (!wanted) {
-			return SUCCESS;
-		}
 		if (php_poll_add(q->ctx, reg->fd, wanted, reg) != SUCCESS) {
+			*err = php_poll_get_error(q->ctx);
 			return FAILURE;
 		}
 		reg->in_ctx = true;
-	} else if (wanted != reg->armed) {
-		if (php_poll_modify(q->ctx, reg->fd, wanted, reg) != SUCCESS) {
-			return FAILURE;
-		}
 	}
-	if (!reg->armed && wanted) {
-		q->n_armed++;
-	} else if (reg->armed && !wanted) {
-		q->n_armed--;
-	}
-	reg->armed = wanted;
+	php_io_poll_fdreg_set_armed(q, reg, wanted);
 	return SUCCESS;
 }
 
@@ -206,8 +236,10 @@ static void php_io_poll_req_unregister(php_io_poll_queue *q, php_io_poll_req *re
 		php_io_poll_fdreg *reg = req->fdreg;
 		php_io_poll_fdreg_unlink(req);
 		req->fdreg = NULL;
-		/* Withdrawing interest cannot fail in a way that matters here */
-		php_io_poll_fdreg_sync(q, reg);
+		/* On failure the registration is left out of the context, which
+		 * the remaining ops re-arm on their next submit */
+		php_poll_error err;
+		php_io_poll_fdreg_sync(q, reg, &err);
 	}
 	if (req->timer) {
 		php_poll_timer_remove(q->ctx, req->timer);
@@ -293,11 +325,12 @@ static void php_io_poll_req_arm(php_io_poll_queue *q, php_io_poll_req *req)
 	req->fd_next = reg->reqs;
 	reg->reqs = req;
 
-	if (php_io_poll_fdreg_sync(q, reg) != SUCCESS) {
-		php_poll_error err = php_poll_get_error(q->ctx);
+	php_poll_error err;
+	if (php_io_poll_fdreg_sync(q, reg, &err) != SUCCESS) {
+		php_poll_error ignored;
 		php_io_poll_fdreg_unlink(req);
 		req->fdreg = NULL;
-		php_io_poll_fdreg_sync(q, reg);
+		php_io_poll_fdreg_sync(q, reg, &ignored);
 		if (err == PHP_POLL_ERR_NOSUPPORT) {
 			php_io_poll_req_complete(q, req, PHP_IO_UNSUPPORTED, 0, 0);
 		} else {
@@ -315,6 +348,9 @@ static void php_io_poll_req_arm(php_io_poll_queue *q, php_io_poll_req *req)
  * an error or hangup completes all of them. */
 static void php_io_poll_fdreg_fire(php_io_poll_queue *q, php_io_poll_fdreg *reg, uint32_t revents)
 {
+	if (reg->dead) {
+		return;
+	}
 	bool failure = (revents & (PHP_POLL_ERROR | PHP_POLL_HUP)) != 0;
 	php_io_poll_req *r = reg->reqs;
 	while (r) {
@@ -478,8 +514,9 @@ static void php_io_poll_queue_remove(php_io_queue *base, php_io_op *op)
 	}
 	php_io_poll_fdreg *reg = php_io_poll_fdreg_get(q, (int) op->fd, false);
 	if (reg && reg->n_retained) {
+		php_poll_error err;
 		reg->n_retained--;
-		php_io_poll_fdreg_sync(q, reg);
+		php_io_poll_fdreg_sync(q, reg, &err);
 	}
 }
 
@@ -626,6 +663,10 @@ static void php_io_poll_queue_destroy(php_io_queue *base)
 		efree(reg);
 	} ZEND_HASH_FOREACH_END();
 	zend_hash_destroy(&q->fdregs);
+	ZEND_HASH_FOREACH_PTR(&q->dead, reg) {
+		efree(reg);
+	} ZEND_HASH_FOREACH_END();
+	zend_hash_destroy(&q->dead);
 
 	php_poll_destroy(q->ctx);
 	if (q->ready) {
@@ -668,6 +709,7 @@ PHPAPI php_io_queue *php_io_queue_create_poll(php_poll_backend_type backend)
 	q->base.ops = &php_io_poll_queue_ops;
 	q->ctx = ctx;
 	zend_hash_init(&q->fdregs, 8, NULL, NULL, 0);
+	zend_hash_init(&q->dead, 0, NULL, NULL, 0);
 	q->events_cap = PHP_IO_POLL_MIN_EVENTS;
 	q->events = safe_emalloc(q->events_cap, sizeof(*q->events), 0);
 	return &q->base;
