@@ -111,6 +111,7 @@ typedef struct {
 	struct _php_curl_send_headers header;
 	struct _php_curl_error        err;
 	bool                     in_callback;
+	bool                     in_exec;  /* curl_exec() is waiting, outside libcurl */
 	uint32_t*                     clone;
 	zval                          postfields;
 	/* For CURLOPT_PRIVATE */
@@ -156,6 +157,7 @@ void _php_curl_cleanup_handle(php_curl *);
 void _php_curl_multi_cleanup_list(void *data);
 void _php_curl_verify_handlers(php_curl *ch, bool reporterror);
 void _php_setup_easy_copy_handlers(php_curl *ch, php_curl *source);
+bool php_curl_check_not_in_exec(php_curl *ch);
 
 /* Consumes `zv` */
 zend_long php_curl_get_long(zval *zv);
