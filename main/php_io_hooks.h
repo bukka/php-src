@@ -151,7 +151,8 @@ typedef struct _php_io_hooks_state {
 } php_io_hooks_state;
 
 /* Install the provider for this request, NULL to uninstall. size allows
- * growing the struct. Fails if a provider is already installed. */
+ * growing the struct. Fails if a provider is already installed, and in
+ * both forms while the provider's add, remove or dtor is running. */
 PHPAPI zend_result php_io_hooks_register(const php_io_hooks *hooks, size_t size, void *data);
 PHPAPI const php_io_hooks *php_io_hooks_current(void **data);
 PHPAPI bool php_io_hooks_active(void);

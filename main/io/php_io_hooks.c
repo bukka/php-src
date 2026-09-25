@@ -188,7 +188,9 @@ static void php_io_persistent_register(php_io_persistent_op *p)
 	if (!p->registered && state) {
 		p->registered = true;
 		if (state->hooks.add) {
+			FG(io_hooks_locked)++;
 			state->hooks.add(state->data, &p->op);
+			FG(io_hooks_locked)--;
 		}
 	}
 }
@@ -228,7 +230,9 @@ static void php_io_persistent_free(php_io_persistent_op *p)
 	php_io_hooks_state *state = FG(io_hooks);
 
 	if (p->registered && state && state->hooks.remove) {
+		FG(io_hooks_locked)++;
 		state->hooks.remove(state->data, &p->op);
+		FG(io_hooks_locked)--;
 	}
 	p->registered = false;
 	if (p->op.queue) {
@@ -280,18 +284,25 @@ PHPAPI zend_result php_io_hooks_register(const php_io_hooks *hooks, size_t size,
 {
 	php_io_hooks_state *state = FG(io_hooks);
 
+	/* Not from add, remove or a dtor of the provider being replaced */
+	if (FG(io_hooks_locked)) {
+		return FAILURE;
+	}
+
 	if (hooks == NULL) {
 		if (state) {
 			FG(io_hooks) = NULL;
-			if (state->hooks.dtor) {
-				state->hooks.dtor(state->data);
-			}
-			efree(state);
 			/* The outgoing provider dropped its registrations; the next one
 			 * sees every persistent op as new */
 			for (php_io_persistent_op *p = FG(io_persistent_ops); p; p = p->next) {
 				p->registered = false;
 			}
+			if (state->hooks.dtor) {
+				FG(io_hooks_locked)++;
+				state->hooks.dtor(state->data);
+				FG(io_hooks_locked)--;
+			}
+			efree(state);
 		}
 		return SUCCESS;
 	}
@@ -339,6 +350,7 @@ static void php_io_unfreeze_list(HashTable *list)
 
 PHPAPI void php_io_hooks_request_shutdown(void)
 {
+	FG(io_hooks_locked) = 0;
 	php_io_hooks_register(NULL, 0, NULL);
 	FG(io_shut_down) = true;
 	if (FG(io_queue)) {
@@ -740,11 +752,65 @@ PHPAPI zend_result php_io_run(php_io_op *op, php_io_op_result *result)
 	return rc;
 }
 
+/* What a provider may leave behind must never be read uninitialized */
+static void php_io_op_clear_outputs(php_io_op *op)
+{
+	switch (op->type) {
+		case PHP_IO_OP_GETADDRINFO:
+			*op->u.getaddrinfo.res = NULL;
+			break;
+		case PHP_IO_OP_GETNAMEINFO:
+			if (op->u.getnameinfo.host && op->u.getnameinfo.hostlen) {
+				op->u.getnameinfo.host[0] = '\0';
+			}
+			if (op->u.getnameinfo.service && op->u.getnameinfo.servicelen) {
+				op->u.getnameinfo.service[0] = '\0';
+			}
+			break;
+		case PHP_IO_OP_WAITPID:
+			if (op->u.waitpid.status) {
+				*op->u.waitpid.status = 0;
+			}
+			break;
+		case PHP_IO_OP_SIGWAIT:
+			if (op->u.sigwait.info) {
+				memset(op->u.sigwait.info, 0, sizeof(*op->u.sigwait.info));
+			}
+			break;
+		default:
+			break;
+	}
+}
+
+/* A successful Done must fit the op: no more bytes than the buffer holds */
+static bool php_io_result_valid(const php_io_op *op, const php_io_op_result *result)
+{
+	if (result->status != PHP_IO_DONE || result->error) {
+		return true;
+	}
+	switch (op->type) {
+		case PHP_IO_OP_READ:
+		case PHP_IO_OP_WRITE:
+		case PHP_IO_OP_RECV:
+		case PHP_IO_OP_SEND:
+			return result->res >= 0 && (uint64_t) result->res <= op->u.io.len;
+		case PHP_IO_OP_ACCEPT:
+		case PHP_IO_OP_WAITPID:
+		case PHP_IO_OP_SIGWAIT:
+			return result->res > 0;
+		case PHP_IO_OP_CONNECT:
+		case PHP_IO_OP_FSYNC:
+			return result->res >= 0;
+		case PHP_IO_OP_GETADDRINFO:
+			return *op->u.getaddrinfo.res != NULL;
+		default:
+			return true;
+	}
+}
+
 static zend_result php_io_run_ex(php_io_op *op, php_io_op_result *result)
 {
-	php_io_hooks_state *state = FG(io_hooks);
-
-	if (state) {
+	if (FG(io_hooks)) {
 		zend_object *pending = EG(exception);
 		php_io_op_register_persistent(op);
 		if (EG(exception) != pending) {
@@ -753,9 +819,28 @@ static zend_result php_io_run_ex(php_io_op *op, php_io_op_result *result)
 			result->error = ECANCELED;
 			return FAILURE;
 		}
+	}
+
+	/* add() may have replaced the provider */
+	php_io_hooks_state *state = FG(io_hooks);
+	if (state) {
+		php_io_op_clear_outputs(op);
+		result->status = PHP_IO_UNSUPPORTED;
+		result->index = 0;
+		result->res = 0;
+		result->error = 0;
 		zend_result rc = state->hooks.run(state->data, op, result);
 		php_io_op_finish(op);
 
+		if (rc == SUCCESS && !php_io_result_valid(op, result)) {
+			if (op->type == PHP_IO_OP_GETADDRINFO) {
+				result->error = EAI_FAIL;
+				result->res = -1;
+			} else {
+				zend_throw_error(NULL, "The IO provider completed an operation with an invalid result");
+				rc = FAILURE;
+			}
+		}
 		if (rc == FAILURE) {
 			result->status = PHP_IO_CANCELLED;
 			result->res = -1;

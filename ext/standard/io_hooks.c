@@ -71,6 +71,7 @@ typedef struct {
 	int64_t res;
 	int error;
 	uint32_t events;            /* readiness mask, for Poll operations and Ready completions */
+	bool produced;              /* from a queue or a completeWith*() method: its result carries real data */
 	zval data;
 	zval completions;           /* array for an Any, undef otherwise */
 	zend_object std;
@@ -207,6 +208,7 @@ static zend_object *php_io_completion_create_object(zend_class_entry *ce)
 	zend_object_std_init(&intern->std, ce);
 	object_properties_init(&intern->std, ce);
 	intern->operation = NULL;
+	intern->produced = false;
 	ZVAL_NULL(&intern->data);
 	ZVAL_UNDEF(&intern->completions);
 	return &intern->std;
@@ -556,7 +558,7 @@ PHP_METHOD(Io_Operation_GetAddrInfo, completeWithAddresses)
 	}
 	php_io_addrinfo_register(head);
 	*op->u.getaddrinfo.res = head;
-	php_io_completion_create(return_value, op, Z_OBJ_P(ZEND_THIS), PHP_IO_DONE, 0, 0, NULL, NULL);
+	php_io_completion_create(return_value, op, Z_OBJ_P(ZEND_THIS), PHP_IO_DONE, 0, 0, NULL, NULL)->produced = true;
 	return;
 
 fail:
@@ -613,7 +615,7 @@ PHP_METHOD(Io_Operation_GetNameInfo, completeWithName)
 			op->u.getnameinfo.service[0] = '\0';
 		}
 	}
-	php_io_completion_create(return_value, op, Z_OBJ_P(ZEND_THIS), PHP_IO_DONE, 0, 0, NULL, NULL);
+	php_io_completion_create(return_value, op, Z_OBJ_P(ZEND_THIS), PHP_IO_DONE, 0, 0, NULL, NULL)->produced = true;
 }
 
 /* Io\Operation\Any */
@@ -913,7 +915,11 @@ PHP_METHOD(Io_Poll_OperationQueue, cancel)
 	}
 
 	php_io_opqueue_sub *sub = op->provider_data;
-	intern->queue->ops->cancel(intern->queue, op);
+	if (intern->queue->ops->cancel(intern->queue, op) == FAILURE) {
+		zend_throw_exception_ex(php_io_exception_class_entry, errno,
+				"Failed to cancel the operation: %s", strerror(errno));
+		RETURN_THROWS();
+	}
 	if (sub) {
 		op->provider_data = NULL;
 		php_io_opqueue_sub_unlink(intern, sub);
@@ -974,14 +980,14 @@ static void php_io_opqueue_completion_to_zval(zval *rv, php_io_queue_completion 
 			php_io_op *member = op->u.any.ops[r->index];
 			zval member_zv;
 			php_io_completion_create(&member_zv, member, php_io_operation_get_zobj(member),
-					r->status, r->res, r->error, NULL, NULL);
+					r->status, r->res, r->error, NULL, NULL)->produced = true;
 			zend_hash_next_index_insert_new(Z_ARRVAL(members), &member_zv);
 		}
 	}
 
 	op->provider_data = NULL;
 	php_io_completion_create(rv, op, sub->operation, c->result.status, c->result.res,
-			c->result.error, &sub->data, Z_TYPE(members) == IS_ARRAY ? &members : NULL);
+			c->result.error, &sub->data, Z_TYPE(members) == IS_ARRAY ? &members : NULL)->produced = true;
 	zval_ptr_dtor(&members);
 }
 
@@ -1109,16 +1115,50 @@ static void php_io_hooks_method_fcc(zend_object *obj, const char *name, zend_fca
 	zend_fcc_addref(fcc);
 }
 
+/* The provider may be replaced from inside run(): the call keeps its own
+ * reference, and nothing of data is read after it */
+static void php_io_hooks_php_call(zend_fcall_info_cache *fcc, zval *retval, php_io_op *op)
+{
+	zend_fcall_info_cache held = *fcc;
+	zval arg;
+
+	GC_ADDREF(held.object);
+	ZVAL_OBJ_COPY(&arg, php_io_operation_get_zobj(op));
+	zend_call_known_fcc(&held, retval, 1, &arg, NULL);
+	zval_ptr_dtor(&arg);
+	OBJ_RELEASE(held.object);
+}
+
+/* A Done that hands data to the caller: bytes in its buffer, a descriptor,
+ * a reaped child, a taken signal, a resolved name */
+static bool php_io_op_result_is_data(php_io_op *op, const php_io_completion_obj *c)
+{
+	if (c->status != PHP_IO_DONE || c->error) {
+		return false;
+	}
+	switch (op->type) {
+		case PHP_IO_OP_READ:
+		case PHP_IO_OP_RECV:
+			return c->res != 0;
+		case PHP_IO_OP_ACCEPT:
+		case PHP_IO_OP_WAITPID:
+		case PHP_IO_OP_SIGWAIT:
+		case PHP_IO_OP_GETADDRINFO:
+		case PHP_IO_OP_GETNAMEINFO:
+			return true;
+		default:
+			return false;
+	}
+}
+
 static zend_result php_io_hooks_php_run(void *data, php_io_op *op, php_io_op_result *result)
 {
 	php_io_hooks_php_data *php_data = data;
 	zend_object *zobj = php_io_operation_get_zobj(op);
-	zval arg, retval;
+	zval retval;
 
-	ZVAL_OBJ_COPY(&arg, zobj);
 	ZVAL_UNDEF(&retval);
-	zend_call_known_fcc(&php_data->run_fcc, &retval, 1, &arg, NULL);
-	zval_ptr_dtor(&arg);
+	php_io_hooks_php_call(&php_data->run_fcc, &retval, op);
 
 	if (EG(exception)) {
 		zval_ptr_dtor(&retval);
@@ -1134,6 +1174,25 @@ static zend_result php_io_hooks_php_run(void *data, php_io_op *op, php_io_op_res
 	if (c->operation != zobj) {
 		zval_ptr_dtor(&retval);
 		zend_throw_error(NULL, "Io\\Hooks\\Hooks::run() returned the completion of another operation");
+		return FAILURE;
+	}
+	if (op->queue && !c->produced) {
+		zval_ptr_dtor(&retval);
+		zend_throw_error(NULL, "Io\\Hooks\\Hooks::run() must cancel the operation or wait for its completion from the queue it was submitted to");
+		return FAILURE;
+	}
+	if (!c->produced && php_io_op_result_is_data(op, c)) {
+		zval_ptr_dtor(&retval);
+		if (op->type == PHP_IO_OP_GETADDRINFO || op->type == PHP_IO_OP_GETNAMEINFO) {
+			/* No name without completeWithAddresses() or completeWithName() */
+			result->status = PHP_IO_DONE;
+			result->index = 0;
+			result->res = -1;
+			result->error = EAI_FAIL;
+			return SUCCESS;
+		}
+		zend_throw_error(NULL, "Io\\Hooks\\Hooks::run() cannot complete %s with a result it did not produce, "
+				"only a queue can", ZSTR_VAL(zobj->ce->name));
 		return FAILURE;
 	}
 
@@ -1166,22 +1225,14 @@ static zend_result php_io_hooks_php_run(void *data, php_io_op *op, php_io_op_res
 	return SUCCESS;
 }
 
-static void php_io_hooks_php_call_void(zend_fcall_info_cache *fcc, php_io_op *op)
-{
-	zval arg;
-	ZVAL_OBJ_COPY(&arg, php_io_operation_get_zobj(op));
-	zend_call_known_fcc(fcc, NULL, 1, &arg, NULL);
-	zval_ptr_dtor(&arg);
-}
-
 static void php_io_hooks_php_add(void *data, php_io_op *op)
 {
-	php_io_hooks_php_call_void(&((php_io_hooks_php_data *) data)->add_fcc, op);
+	php_io_hooks_php_call(&((php_io_hooks_php_data *) data)->add_fcc, NULL, op);
 }
 
 static void php_io_hooks_php_remove(void *data, php_io_op *op)
 {
-	php_io_hooks_php_call_void(&((php_io_hooks_php_data *) data)->remove_fcc, op);
+	php_io_hooks_php_call(&((php_io_hooks_php_data *) data)->remove_fcc, NULL, op);
 }
 
 static void php_io_hooks_php_dtor(void *data)
@@ -1243,6 +1294,10 @@ PHP_FUNCTION(Io_Hooks_set_hooks)
 		Z_PARAM_OBJ_OF_CLASS_OR_NULL(hooks_obj, php_io_hooks_ce)
 	ZEND_PARSE_PARAMETERS_END();
 
+	if (FG(io_hooks_locked)) {
+		zend_throw_error(NULL, "Io\\Hooks\\set_hooks() cannot be called from getCapabilities(), add(), remove() or a provider destructor");
+		RETURN_THROWS();
+	}
 	zend_object *previous = php_io_hooks_php_current();
 	if (php_io_hooks_active() && !previous) {
 		zend_throw_error(NULL, "IO hooks are owned by an internal provider");
@@ -1257,7 +1312,9 @@ PHP_FUNCTION(Io_Hooks_set_hooks)
 		zend_fcall_info_cache caps_fcc;
 		php_io_hooks_method_fcc(hooks_obj, "getCapabilities", &caps_fcc);
 		ZVAL_UNDEF(&capabilities);
+		FG(io_hooks_locked)++;
 		zend_call_known_fcc(&caps_fcc, &capabilities, 0, NULL, NULL);
+		FG(io_hooks_locked)--;
 		zend_fcc_dtor(&caps_fcc);
 		if (EG(exception)) {
 			zval_ptr_dtor(&capabilities);
