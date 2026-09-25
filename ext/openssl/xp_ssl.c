@@ -3364,9 +3364,12 @@ static int php_openssl_sockop_close(php_stream *stream, int close_handle) /* {{{
 			php_deadline deadline = php_io_deadline_from_ms(500);
 			php_io_poll(NULL, sslsock->s.socket, PHP_POLL_WRITE, &deadline);
 #endif
+			php_netstream_restore_blocking(&sslsock->s);
 			closesocket(sslsock->s.socket);
 			sslsock->s.socket = SOCK_ERR;
 		}
+	} else {
+		php_netstream_restore_blocking(&sslsock->s);
 	}
 
 	if (sslsock->sni_certs) {
@@ -3487,7 +3490,7 @@ static inline int php_openssl_tcp_sockop_accept(php_stream *stream, php_openssl_
 
 		clisockdata->s.socket = clisock;
 		clisockdata->s.is_blocked = true;
-		php_set_sock_blocking(clisock, false);
+		php_netstream_set_nonblocking(&clisockdata->s);
 
 		xparam->outputs.client = php_stream_alloc_rel(stream->ops, clisockdata, NULL, "r+");
 		if (xparam->outputs.client) {

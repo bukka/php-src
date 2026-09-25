@@ -1293,7 +1293,7 @@ PHPAPI php_stream *_php_stream_sock_open_from_socket(php_socket_t socket, const 
 	sock->timeout.tv_sec = FG(default_socket_timeout);
 	sock->timeout.tv_usec = 0;
 	sock->socket = socket;
-	php_set_sock_blocking(socket, false);
+	php_netstream_set_nonblocking(sock);
 
 	stream = php_stream_alloc_rel(&php_stream_generic_socket_ops, sock, persistent_id, "r+");
 
@@ -1354,6 +1354,35 @@ PHPAPI zend_result php_set_sock_blocking(php_socket_t socketd, bool block)
 	}
 #endif
 	return ret;
+}
+
+PHPAPI void php_netstream_set_nonblocking(php_netstream_data_t *sock)
+{
+	if (sock->socket == SOCK_ERR) {
+		return;
+	}
+#ifdef PHP_WIN32
+	/* The mode of a socket cannot be queried, sockets start blocking */
+	if (php_set_sock_blocking(sock->socket, false) == SUCCESS) {
+		sock->restore_blocking = true;
+	}
+#else
+	int flags = fcntl(sock->socket, F_GETFL);
+	if (flags == -1 || (flags & O_NONBLOCK)) {
+		return;
+	}
+	if (fcntl(sock->socket, F_SETFL, flags | O_NONBLOCK) == 0) {
+		sock->restore_blocking = true;
+	}
+#endif
+}
+
+PHPAPI void php_netstream_restore_blocking(php_netstream_data_t *sock)
+{
+	if (sock->restore_blocking && sock->socket != SOCK_ERR) {
+		php_set_sock_blocking(sock->socket, true);
+	}
+	sock->restore_blocking = false;
 }
 
 PHPAPI void _php_emit_fd_setsize_warning(int max_fd)

@@ -174,12 +174,14 @@ static int php_sockop_close(php_stream *stream, int close_handle)
 		return 0;
 	}
 
-	if (close_handle) {
-
 #ifdef PHP_WIN32
-		if (sock->socket == -1)
-			sock->socket = SOCK_ERR;
+	if (sock->socket == -1)
+		sock->socket = SOCK_ERR;
 #endif
+
+	if (!close_handle) {
+		php_netstream_restore_blocking(sock);
+	} else {
 		if (sock->socket != SOCK_ERR) {
 #ifdef PHP_WIN32
 			/* prevent more data from coming in */
@@ -194,6 +196,7 @@ static int php_sockop_close(php_stream *stream, int close_handle)
 			php_deadline deadline = php_io_deadline_from_ms(500);
 			php_io_poll(NULL, sock->socket, PHP_POLL_WRITE, &deadline);
 #endif
+			php_netstream_restore_blocking(sock);
 			closesocket(sock->socket);
 			sock->socket = SOCK_ERR;
 		}
@@ -1030,7 +1033,7 @@ static inline int php_tcp_sockop_accept(php_stream *stream, php_netstream_data_t
 		memcpy(clisockdata, sock, sizeof(*clisockdata));
 		clisockdata->socket = clisock;
 		clisockdata->is_blocked = true;
-		php_set_sock_blocking(clisock, false);
+		php_netstream_set_nonblocking(clisockdata);
 
 		xparam->outputs.client = php_stream_alloc_rel(stream->ops, clisockdata, NULL, "r+");
 		if (xparam->outputs.client) {
@@ -1057,15 +1060,19 @@ static int php_tcp_sockop_set_option(php_stream *stream, int option, int value, 
 				case STREAM_XPORT_OP_CONNECT:
 				case STREAM_XPORT_OP_CONNECT_ASYNC:
 					xparam->outputs.returncode = php_tcp_sockop_connect(stream, sock, xparam);
-					if (xparam->outputs.returncode == 0 && sock->socket != SOCK_ERR) {
-						php_set_sock_blocking(sock->socket, false);
+					if (xparam->outputs.returncode == 0) {
+						php_netstream_set_nonblocking(sock);
+						if (xparam->op == STREAM_XPORT_OP_CONNECT_ASYNC && sock->socket != SOCK_ERR) {
+							/* our own socket, left non-blocking by the async connect */
+							sock->restore_blocking = true;
+						}
 					}
 					return PHP_STREAM_OPTION_RETURN_OK;
 
 				case STREAM_XPORT_OP_BIND:
 					xparam->outputs.returncode = php_tcp_sockop_bind(stream, sock, xparam);
-					if (xparam->outputs.returncode == 0 && sock->socket != SOCK_ERR) {
-						php_set_sock_blocking(sock->socket, false);
+					if (xparam->outputs.returncode == 0) {
+						php_netstream_set_nonblocking(sock);
 					}
 					return PHP_STREAM_OPTION_RETURN_OK;
 

@@ -366,8 +366,15 @@ struct _php_netstream_data_t	{
 	bool timeout_event;
 	struct timeval timeout;
 	size_t ownsize;
+	/* the descriptor was blocking before the stream made it non-blocking */
+	bool restore_blocking;
 };
 typedef struct _php_netstream_data_t php_netstream_data_t;
+
+BEGIN_EXTERN_C()
+PHPAPI void php_netstream_set_nonblocking(php_netstream_data_t *sock);
+PHPAPI void php_netstream_restore_blocking(php_netstream_data_t *sock);
+END_EXTERN_C()
 PHPAPI extern const php_stream_ops php_stream_socket_ops;
 extern const php_stream_ops php_stream_generic_socket_ops;
 #define PHP_STREAM_IS_SOCKET	(&php_stream_socket_ops)
