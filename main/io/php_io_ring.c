@@ -1117,51 +1117,59 @@ PHPAPI int php_io_ring_wait(php_io_ring *ring, php_io_queue_completion *out, uin
 
 PHPAPI void php_io_ring_destroy(php_io_ring *ring)
 {
-	if (php_io_ring_foreign(ring)) {
-		while (ring->live) {
-			php_io_ring_req *req = ring->live;
-			req->orphaned = false;
-			req->delivered = true;
-			if (req->ready) {
-				php_io_ring_list_remove(ring->ready, &ring->n_ready, req);
-			}
-			php_io_ring_req_free(ring, req);
+	bool foreign = php_io_ring_foreign(ring);
+
+	/* Nobody takes a completion any more: every op forgets its record, as
+	 * after a cancel, and every record is an orphan */
+	for (php_io_ring_req *r = ring->live; r; r = r->next) {
+		if (r->op) {
+			r->op->queue = NULL;
+			r->op->queue_data = NULL;
+			r->op->in_flight = false;
+			r->op = NULL;
 		}
-		if (ring->ready) {
-			efree(ring->ready);
+		if (foreign) {
+			r->main_done = true;
+			r->lt_done = true;
+			r->delivered = true;
 		}
-		if (ring->fired) {
-			efree(ring->fired);
-		}
-		efree(ring->cqes);
-		efree(ring);
-		return;
+		r->group = NULL;
+		r->ready = false;
+		r->fired = false;
+		r->orphaned = true;
 	}
+	ring->n_ready = 0;
+	ring->n_fired = 0;
+	ring->pending = 0;
 
 	/* Cancel everything in flight and drain until each has completed */
-	for (php_io_ring_req *req = ring->live; req; req = req->next) {
-		php_io_ring_req_cancel(ring, req);
-	}
-	while (ring->live) {
-		php_io_ring_req *req = ring->live;
-		if (php_io_ring_req_settled(req)) {
-			if (req->ready) {
-				php_io_ring_list_remove(ring->ready, &ring->n_ready, req);
+	for (;;) {
+		php_io_ring_req *r = ring->live;
+		while (r) {
+			php_io_ring_req *next = r->next;
+			if (php_io_ring_req_settled(r)) {
+				php_io_ring_req_free(ring, r);
+			} else if (!r->cancelled) {
+				php_io_ring_req_cancel(ring, r);
 			}
-			php_io_ring_req_free(ring, req);
-			continue;
+			r = next;
+		}
+		if (!ring->live) {
+			break;
 		}
 		ior_cqe *cqe;
-		if (ior_wait_cqe(ring->ctx, &cqe) < 0) {
+		int rc = ior_wait_cqe(ring->ctx, &cqe);
+		if (rc < 0 && rc != -EINTR) {
+			/* The backend may still write into what the records own: they
+			 * and the context are leaked rather than freed under it */
+			ring->ctx = NULL;
 			break;
 		}
 		php_io_ring_reap(ring);
-		/* Settled records that were still wanted are dropped on the next pass */
-		for (php_io_ring_req *r = ring->live; r; r = r->next) {
-			r->orphaned = true;
-		}
 	}
-	ior_queue_exit(ring->ctx);
+	if (ring->ctx && !foreign) {
+		ior_queue_exit(ring->ctx);
+	}
 	if (ring->ready) {
 		efree(ring->ready);
 	}
