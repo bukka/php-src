@@ -31,8 +31,10 @@ ZEND_STATIC_ASSERT(sizeof(php_siginfo_t) == sizeof(ior_siginfo_t), "php_siginfo_
 /* One submitted op. The main submission and its linked timeout each
  * produce a cqe, and the record lives until both were reaped, however the
  * op ended: a buffer stays in use until the main cqe arrived. What the
- * backend reads or writes besides a stream's buffer lives in the record
- * and reaches the op only when its completion is delivered. */
+ * backend reads or writes besides a stream's read buffer lives in the
+ * record and reaches the op only when its completion is delivered. The
+ * record outlives the request when the backend cannot be stopped, so what
+ * the backend sees is malloc'ed. */
 typedef struct _php_io_ring_req php_io_ring_req;
 
 struct _php_io_ring_req {
@@ -72,6 +74,7 @@ struct _php_io_ring_req {
 		struct { php_socket_t fd; bool data_only; } fsync;
 		struct { int status; } waitpid;
 		struct { php_sigset_t set; php_siginfo_t info; } sigwait;
+		struct { char *buf; } io;       /* bounce buffer, NULL on a stream's read buffer */
 	} u;
 };
 
@@ -249,14 +252,20 @@ static uint32_t php_io_ring_reap(php_io_ring *ring);
 
 /* Records */
 
+/* What one submission of a data op transfers at most */
+static zend_always_inline unsigned php_io_ring_io_len(php_io_op *op)
+{
+	return (unsigned) MIN(op->u.io.len, UINT32_MAX);
+}
+
 /* The inputs are copied and the outputs get slots of their own, so that a
  * record outliving the op's frame never touches it */
 static void php_io_ring_req_capture(php_io_ring_req *req, php_io_op *op)
 {
 	switch (op->type) {
 		case PHP_IO_OP_GETADDRINFO:
-			req->u.gai.node = op->u.getaddrinfo.node ? estrdup(op->u.getaddrinfo.node) : NULL;
-			req->u.gai.service = op->u.getaddrinfo.service ? estrdup(op->u.getaddrinfo.service) : NULL;
+			req->u.gai.node = op->u.getaddrinfo.node ? pestrdup(op->u.getaddrinfo.node, 1) : NULL;
+			req->u.gai.service = op->u.getaddrinfo.service ? pestrdup(op->u.getaddrinfo.service, 1) : NULL;
 			if (op->u.getaddrinfo.hints) {
 				req->u.gai.hints.ai_flags = op->u.getaddrinfo.hints->ai_flags;
 				req->u.gai.hints.ai_family = op->u.getaddrinfo.hints->ai_family;
@@ -267,28 +276,28 @@ static void php_io_ring_req_capture(php_io_ring_req *req, php_io_op *op)
 			break;
 		case PHP_IO_OP_GETNAMEINFO:
 			req->u.gni.addrlen = op->u.getnameinfo.addrlen;
-			req->u.gni.addr = emalloc(MAX(req->u.gni.addrlen, 1));
+			req->u.gni.addr = pemalloc(MAX(req->u.gni.addrlen, 1), 1);
 			memcpy(req->u.gni.addr, op->u.getnameinfo.addr, req->u.gni.addrlen);
 			req->u.gni.flags = op->u.getnameinfo.flags;
 			if (op->u.getnameinfo.host && op->u.getnameinfo.hostlen) {
 				req->u.gni.hostlen = op->u.getnameinfo.hostlen;
-				req->u.gni.host = emalloc(req->u.gni.hostlen);
+				req->u.gni.host = pemalloc(req->u.gni.hostlen, 1);
 			}
 			if (op->u.getnameinfo.service && op->u.getnameinfo.servicelen) {
 				req->u.gni.servicelen = op->u.getnameinfo.servicelen;
-				req->u.gni.service = emalloc(req->u.gni.servicelen);
+				req->u.gni.service = pemalloc(req->u.gni.servicelen, 1);
 			}
 			break;
 		case PHP_IO_OP_ACCEPT:
 			if (op->u.accept.addr && op->u.accept.addrlen) {
 				req->u.sock.cap = *op->u.accept.addrlen;
 				req->u.sock.addrlen = req->u.sock.cap;
-				req->u.sock.addr = emalloc(MAX(req->u.sock.cap, 1));
+				req->u.sock.addr = pemalloc(MAX(req->u.sock.cap, 1), 1);
 			}
 			break;
 		case PHP_IO_OP_CONNECT:
 			req->u.sock.addrlen = op->u.connect.addrlen;
-			req->u.sock.addr = emalloc(MAX(req->u.sock.addrlen, 1));
+			req->u.sock.addr = pemalloc(MAX(req->u.sock.addrlen, 1), 1);
 			memcpy(req->u.sock.addr, op->u.connect.addr, req->u.sock.addrlen);
 			break;
 		case PHP_IO_OP_FSYNC:
@@ -297,6 +306,17 @@ static void php_io_ring_req_capture(php_io_ring_req *req, php_io_op *op)
 			break;
 		case PHP_IO_OP_SIGWAIT:
 			req->u.sigwait.set = *op->u.sigwait.set;
+			break;
+		case PHP_IO_OP_READ:
+		case PHP_IO_OP_RECV:
+			if (!(op->flags & PHP_IO_OP_F_STREAM_BUF)) {
+				req->u.io.buf = pemalloc(MAX(php_io_ring_io_len(op), 1), 1);
+			}
+			break;
+		case PHP_IO_OP_WRITE:
+		case PHP_IO_OP_SEND:
+			req->u.io.buf = pemalloc(MAX(php_io_ring_io_len(op), 1), 1);
+			memcpy(req->u.io.buf, op->u.io.buf, php_io_ring_io_len(op));
 			break;
 		default:
 			break;
@@ -342,6 +362,12 @@ static void php_io_ring_req_output(php_io_ring_req *req, php_io_op *op)
 				*op->u.sigwait.info = req->u.sigwait.info;
 			}
 			break;
+		case PHP_IO_OP_READ:
+		case PHP_IO_OP_RECV:
+			if (res > 0 && req->u.io.buf) {
+				memcpy(op->u.io.buf, req->u.io.buf, res);
+			}
+			break;
 		default:
 			break;
 	}
@@ -359,19 +385,19 @@ static void php_io_ring_req_discard(php_io_ring_req *req)
 				freeaddrinfo(req->u.gai.res);
 			}
 			if (req->u.gai.node) {
-				efree(req->u.gai.node);
+				pefree(req->u.gai.node, 1);
 			}
 			if (req->u.gai.service) {
-				efree(req->u.gai.service);
+				pefree(req->u.gai.service, 1);
 			}
 			break;
 		case PHP_IO_OP_GETNAMEINFO:
-			efree(req->u.gni.addr);
+			pefree(req->u.gni.addr, 1);
 			if (req->u.gni.host) {
-				efree(req->u.gni.host);
+				pefree(req->u.gni.host, 1);
 			}
 			if (req->u.gni.service) {
-				efree(req->u.gni.service);
+				pefree(req->u.gni.service, 1);
 			}
 			break;
 		case PHP_IO_OP_ACCEPT:
@@ -381,7 +407,15 @@ static void php_io_ring_req_discard(php_io_ring_req *req)
 			ZEND_FALLTHROUGH;
 		case PHP_IO_OP_CONNECT:
 			if (req->u.sock.addr) {
-				efree(req->u.sock.addr);
+				pefree(req->u.sock.addr, 1);
+			}
+			break;
+		case PHP_IO_OP_READ:
+		case PHP_IO_OP_RECV:
+		case PHP_IO_OP_WRITE:
+		case PHP_IO_OP_SEND:
+			if (req->u.io.buf) {
+				pefree(req->u.io.buf, 1);
 			}
 			break;
 		case PHP_IO_OP_WAITPID:
@@ -401,7 +435,7 @@ static void php_io_ring_req_discard(php_io_ring_req *req)
 
 static php_io_ring_req *php_io_ring_req_create(php_io_ring *ring, php_io_op *op, void *data)
 {
-	php_io_ring_req *req = ecalloc(1, sizeof(*req));
+	php_io_ring_req *req = pecalloc(1, sizeof(*req), 1);
 	req->op = op;
 	req->data = data;
 	req->type = op->type;
@@ -469,7 +503,7 @@ static void php_io_ring_req_free(php_io_ring *ring, php_io_ring_req *req)
 	if (req->members) {
 		efree(req->members);
 	}
-	efree(req);
+	pefree(req, 1);
 }
 
 /* Read and Write ops carry a file descriptor: on Windows a CRT one, whose
@@ -482,6 +516,12 @@ static zend_always_inline ior_fd_t php_io_ring_file_fd(php_io_op *op)
 #else
 	return (ior_fd_t) op->fd;
 #endif
+}
+
+/* The bounce buffer, or the stream's read buffer the op points at */
+static zend_always_inline void *php_io_ring_io_buf(php_io_ring_req *req, php_io_op *op)
+{
+	return req->u.io.buf ? req->u.io.buf : op->u.io.buf;
 }
 
 /* Work callbacks: they run on a worker and see only the record */
@@ -659,21 +699,21 @@ static zend_result php_io_ring_submit_one(php_io_ring *ring, php_io_ring_req *re
 			ior_prep_timeout(ctx, sqe, &req->ts, 0, 0);
 			break;
 		case PHP_IO_OP_READ:
-			ior_prep_read(ctx, sqe, php_io_ring_file_fd(op), op->u.io.buf, (unsigned) MIN(op->u.io.len, UINT32_MAX),
+			ior_prep_read(ctx, sqe, php_io_ring_file_fd(op), php_io_ring_io_buf(req, op), php_io_ring_io_len(op),
 					op->u.io.offset < 0 ? IOR_OFF_NONE : (uint64_t) op->u.io.offset);
 			uses_caller = true;
 			break;
 		case PHP_IO_OP_WRITE:
-			ior_prep_write(ctx, sqe, php_io_ring_file_fd(op), op->u.io.buf, (unsigned) MIN(op->u.io.len, UINT32_MAX),
+			ior_prep_write(ctx, sqe, php_io_ring_file_fd(op), php_io_ring_io_buf(req, op), php_io_ring_io_len(op),
 					op->u.io.offset < 0 ? IOR_OFF_NONE : (uint64_t) op->u.io.offset);
 			uses_caller = true;
 			break;
 		case PHP_IO_OP_RECV:
-			ior_prep_recv(ctx, sqe, (ior_fd_t) op->fd, op->u.io.buf, (unsigned) MIN(op->u.io.len, UINT32_MAX), op->u.io.flags);
+			ior_prep_recv(ctx, sqe, (ior_fd_t) op->fd, php_io_ring_io_buf(req, op), php_io_ring_io_len(op), op->u.io.flags);
 			uses_caller = true;
 			break;
 		case PHP_IO_OP_SEND:
-			ior_prep_send(ctx, sqe, (ior_fd_t) op->fd, op->u.io.buf, (unsigned) MIN(op->u.io.len, UINT32_MAX), op->u.io.flags);
+			ior_prep_send(ctx, sqe, (ior_fd_t) op->fd, php_io_ring_io_buf(req, op), php_io_ring_io_len(op), op->u.io.flags);
 			uses_caller = true;
 			break;
 		case PHP_IO_OP_ACCEPT:

@@ -1095,11 +1095,19 @@ static bool php_io_data_result(const php_io_op_result *result, ssize_t *ret)
 		return ret; \
 	} while (0)
 
+/* Where _php_stream_fill_read_buffer() reads: memory the stream owns and
+ * frees only after its orphans were drained. A queue may leave an op on it
+ * past the frame; any other buffer is the caller's. */
+static zend_always_inline uint32_t php_io_stream_buf_flag(php_stream *stream, const void *buf)
+{
+	return stream && stream->readbuf && buf == stream->readbuf + stream->writepos ? PHP_IO_OP_F_STREAM_BUF : 0;
+}
+
 PHPAPI ssize_t php_io_recv(php_stream *stream, php_socket_t fd, void *buf, size_t len, int flags, php_deadline *dl)
 {
 	PHP_IO_DESCRIPTOR_OP(stream, fd, dl,
 			recv(fd, buf, len, flags),
-			php_io_op_recv(&op, f.handle, fd, buf, len, flags, *dl));
+			(php_io_op_recv(&op, f.handle, fd, buf, len, flags, *dl), op.flags |= php_io_stream_buf_flag(stream, buf)));
 }
 
 PHPAPI ssize_t php_io_send(php_stream *stream, php_socket_t fd, const void *buf, size_t len, int flags, php_deadline *dl)
@@ -1302,6 +1310,9 @@ static ssize_t php_io_file_op(php_stream *stream, int fd, php_deadline *dl, bool
 	for (;;) {
 		if (offload) {
 			prep(&op, f.handle, fd, buf, len, offset, *dl);
+			if (prep == php_io_op_read) {
+				op.flags |= php_io_stream_buf_flag(stream, buf);
+			}
 			op.stream = stream;
 			if (php_io_run(&op, &result) == FAILURE) {
 				php_io_set_errno(ECANCELED);

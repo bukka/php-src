@@ -41,6 +41,7 @@ typedef enum {
 } php_io_op_type;
 
 #define PHP_IO_OP_F_PERSISTENT 0x01   /* POLL only: a registration that outlives one run */
+#define PHP_IO_OP_F_STREAM_BUF 0x02   /* READ/RECV: buf is op->stream's read buffer, valid until the stream is drained */
 
 typedef enum {
 	PHP_IO_DONE,
