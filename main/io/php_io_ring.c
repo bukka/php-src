@@ -11,6 +11,7 @@
 */
 
 #include "php.h"
+#include "php_network.h"
 #include "main/php_io_ring.h"
 
 #ifdef HAVE_IOR
@@ -20,6 +21,7 @@
 #ifndef PHP_WIN32
 # include <netdb.h>
 # include <unistd.h>
+# include <sys/wait.h>
 #endif
 
 /* The op layer's signal types are handed to ior as they are */
@@ -28,13 +30,17 @@ ZEND_STATIC_ASSERT(sizeof(php_siginfo_t) == sizeof(ior_siginfo_t), "php_siginfo_
 
 /* One submitted op. The main submission and its linked timeout each
  * produce a cqe, and the record lives until both were reaped, however the
- * op ended: a buffer stays in use until the main cqe arrived. */
+ * op ended: a buffer stays in use until the main cqe arrived. What the
+ * backend reads or writes besides a stream's buffer lives in the record
+ * and reaches the op only when its completion is delivered. */
 typedef struct _php_io_ring_req php_io_ring_req;
 
 struct _php_io_ring_req {
 	php_io_op *op;
 	void *data;
+	php_io_op_type type;
 	php_io_op_result result;
+	int32_t main_res;               /* the main cqe's result, -1 until then */
 	php_io_ring_req *group;         /* member: the Any's request */
 	uint32_t index;                 /* member: position in the Any */
 	bool has_lt;                    /* a linked timeout was submitted */
@@ -43,6 +49,7 @@ struct _php_io_ring_req {
 	int32_t lt_res;
 	bool cancelled;                 /* cancel() was called */
 	bool orphaned;                  /* nobody wants the completion */
+	bool delivered;                 /* the output went to the op */
 	php_stream *orphan_stream;      /* frozen until the record settled */
 	bool ready;                     /* top-level: completion to deliver */
 	bool fired;                     /* group: in the fired list */
@@ -52,6 +59,16 @@ struct _php_io_ring_req {
 	uint32_t n_settled;             /* group: members whose cqes all arrived */
 	php_io_ring_req *prev;          /* live list */
 	php_io_ring_req *next;
+	union {
+		struct { char *node; char *service; struct addrinfo hints; bool has_hints;
+		         struct addrinfo *res; } gai;
+		struct { struct sockaddr *addr; socklen_t addrlen; int flags;
+		         char *host; size_t hostlen; char *service; size_t servicelen; } gni;
+		struct { struct sockaddr *addr; socklen_t addrlen; socklen_t cap; } sock;
+		struct { php_socket_t fd; bool data_only; } fsync;
+		struct { int status; } waitpid;
+		struct { php_sigset_t set; php_siginfo_t info; } sigwait;
+	} u;
 };
 
 struct php_io_ring {
@@ -199,11 +216,164 @@ static uint32_t php_io_ring_reap(php_io_ring *ring);
 
 /* Records */
 
+/* The inputs are copied and the outputs get slots of their own, so that a
+ * record outliving the op's frame never touches it */
+static void php_io_ring_req_capture(php_io_ring_req *req, php_io_op *op)
+{
+	switch (op->type) {
+		case PHP_IO_OP_GETADDRINFO:
+			req->u.gai.node = op->u.getaddrinfo.node ? estrdup(op->u.getaddrinfo.node) : NULL;
+			req->u.gai.service = op->u.getaddrinfo.service ? estrdup(op->u.getaddrinfo.service) : NULL;
+			if (op->u.getaddrinfo.hints) {
+				req->u.gai.hints.ai_flags = op->u.getaddrinfo.hints->ai_flags;
+				req->u.gai.hints.ai_family = op->u.getaddrinfo.hints->ai_family;
+				req->u.gai.hints.ai_socktype = op->u.getaddrinfo.hints->ai_socktype;
+				req->u.gai.hints.ai_protocol = op->u.getaddrinfo.hints->ai_protocol;
+				req->u.gai.has_hints = true;
+			}
+			break;
+		case PHP_IO_OP_GETNAMEINFO:
+			req->u.gni.addrlen = op->u.getnameinfo.addrlen;
+			req->u.gni.addr = emalloc(MAX(req->u.gni.addrlen, 1));
+			memcpy(req->u.gni.addr, op->u.getnameinfo.addr, req->u.gni.addrlen);
+			req->u.gni.flags = op->u.getnameinfo.flags;
+			if (op->u.getnameinfo.host && op->u.getnameinfo.hostlen) {
+				req->u.gni.hostlen = op->u.getnameinfo.hostlen;
+				req->u.gni.host = emalloc(req->u.gni.hostlen);
+			}
+			if (op->u.getnameinfo.service && op->u.getnameinfo.servicelen) {
+				req->u.gni.servicelen = op->u.getnameinfo.servicelen;
+				req->u.gni.service = emalloc(req->u.gni.servicelen);
+			}
+			break;
+		case PHP_IO_OP_ACCEPT:
+			if (op->u.accept.addr && op->u.accept.addrlen) {
+				req->u.sock.cap = *op->u.accept.addrlen;
+				req->u.sock.addrlen = req->u.sock.cap;
+				req->u.sock.addr = emalloc(MAX(req->u.sock.cap, 1));
+			}
+			break;
+		case PHP_IO_OP_CONNECT:
+			req->u.sock.addrlen = op->u.connect.addrlen;
+			req->u.sock.addr = emalloc(MAX(req->u.sock.addrlen, 1));
+			memcpy(req->u.sock.addr, op->u.connect.addr, req->u.sock.addrlen);
+			break;
+		case PHP_IO_OP_FSYNC:
+			req->u.fsync.fd = op->fd;
+			req->u.fsync.data_only = op->u.fsync.data_only;
+			break;
+		case PHP_IO_OP_SIGWAIT:
+			req->u.sigwait.set = *op->u.sigwait.set;
+			break;
+		default:
+			break;
+	}
+}
+
+/* The completion is delivered: the op gets what the record collected */
+static void php_io_ring_req_output(php_io_ring_req *req, php_io_op *op)
+{
+	int32_t res = req->main_res;
+
+	req->delivered = true;
+	switch (req->type) {
+		case PHP_IO_OP_GETADDRINFO:
+			if (op->u.getaddrinfo.res) {
+				*op->u.getaddrinfo.res = req->u.gai.res;
+				req->u.gai.res = NULL;
+			}
+			break;
+		case PHP_IO_OP_GETNAMEINFO:
+			if (res == 0) {
+				if (req->u.gni.host) {
+					memcpy(op->u.getnameinfo.host, req->u.gni.host, req->u.gni.hostlen);
+				}
+				if (req->u.gni.service) {
+					memcpy(op->u.getnameinfo.service, req->u.gni.service, req->u.gni.servicelen);
+				}
+			}
+			break;
+		case PHP_IO_OP_ACCEPT:
+			if (res >= 0 && req->u.sock.addr) {
+				memcpy(op->u.accept.addr, req->u.sock.addr, MIN(req->u.sock.addrlen, req->u.sock.cap));
+				*op->u.accept.addrlen = req->u.sock.addrlen;
+			}
+			break;
+		case PHP_IO_OP_WAITPID:
+			if (res > 0 && op->u.waitpid.status) {
+				*op->u.waitpid.status = req->u.waitpid.status;
+			}
+			break;
+		case PHP_IO_OP_SIGWAIT:
+			if (res > 0 && op->u.sigwait.info) {
+				*op->u.sigwait.info = req->u.sigwait.info;
+			}
+			break;
+		default:
+			break;
+	}
+}
+
+/* The record goes away: what the op produced and nobody took is released */
+static void php_io_ring_req_discard(php_io_ring_req *req)
+{
+	bool unclaimed = req->main_done && !req->delivered;
+	int32_t res = req->main_res;
+
+	switch (req->type) {
+		case PHP_IO_OP_GETADDRINFO:
+			if (req->u.gai.res) {
+				freeaddrinfo(req->u.gai.res);
+			}
+			if (req->u.gai.node) {
+				efree(req->u.gai.node);
+			}
+			if (req->u.gai.service) {
+				efree(req->u.gai.service);
+			}
+			break;
+		case PHP_IO_OP_GETNAMEINFO:
+			efree(req->u.gni.addr);
+			if (req->u.gni.host) {
+				efree(req->u.gni.host);
+			}
+			if (req->u.gni.service) {
+				efree(req->u.gni.service);
+			}
+			break;
+		case PHP_IO_OP_ACCEPT:
+			if (unclaimed && res >= 0) {
+				closesocket((php_socket_t) res);
+			}
+			ZEND_FALLTHROUGH;
+		case PHP_IO_OP_CONNECT:
+			if (req->u.sock.addr) {
+				efree(req->u.sock.addr);
+			}
+			break;
+		case PHP_IO_OP_WAITPID:
+			/* ior reaped the child: its status goes to the next wait for it */
+#ifdef PHP_WIN32
+			if (unclaimed && res > 0) {
+#else
+			if (unclaimed && res > 0 && (WIFEXITED(req->u.waitpid.status) || WIFSIGNALED(req->u.waitpid.status))) {
+#endif
+				php_io_child_reaped((pid_t) res, req->u.waitpid.status);
+			}
+			break;
+		default:
+			break;
+	}
+}
+
 static php_io_ring_req *php_io_ring_req_create(php_io_ring *ring, php_io_op *op, void *data)
 {
 	php_io_ring_req *req = ecalloc(1, sizeof(*req));
 	req->op = op;
 	req->data = data;
+	req->type = op->type;
+	req->main_res = -1;
+	php_io_ring_req_capture(req, op);
 	req->next = ring->live;
 	if (ring->live) {
 		ring->live->prev = req;
@@ -226,6 +396,7 @@ static void php_io_ring_req_free(php_io_ring *ring, php_io_ring_req *req)
 	if (req->next) {
 		req->next->prev = req->prev;
 	}
+	php_io_ring_req_discard(req);
 	if (req->members) {
 		efree(req->members);
 	}
@@ -244,32 +415,30 @@ static zend_always_inline ior_fd_t php_io_ring_file_fd(php_io_op *op)
 #endif
 }
 
-/* Work callbacks: the result handoff is the op's own shape, the callback
- * fills the caller-owned result through the op and returns the code that
- * becomes the cqe result */
+/* Work callbacks: they run on a worker and see only the record */
 
 static int32_t php_io_ring_work_getaddrinfo(ior_work_token *token, void *arg)
 {
-	php_io_op *op = arg;
-	return getaddrinfo(op->u.getaddrinfo.node, op->u.getaddrinfo.service,
-			op->u.getaddrinfo.hints, op->u.getaddrinfo.res);
+	php_io_ring_req *req = arg;
+	return getaddrinfo(req->u.gai.node, req->u.gai.service,
+			req->u.gai.has_hints ? &req->u.gai.hints : NULL, &req->u.gai.res);
 }
 
 static int32_t php_io_ring_work_getnameinfo(ior_work_token *token, void *arg)
 {
-	php_io_op *op = arg;
-	return getnameinfo(op->u.getnameinfo.addr, op->u.getnameinfo.addrlen,
-			op->u.getnameinfo.host, op->u.getnameinfo.hostlen,
-			op->u.getnameinfo.service, op->u.getnameinfo.servicelen, op->u.getnameinfo.flags);
+	php_io_ring_req *req = arg;
+	return getnameinfo(req->u.gni.addr, req->u.gni.addrlen,
+			req->u.gni.host, req->u.gni.hostlen,
+			req->u.gni.service, req->u.gni.servicelen, req->u.gni.flags);
 }
 
 static int32_t php_io_ring_work_fsync(ior_work_token *token, void *arg)
 {
-	php_io_op *op = arg;
+	php_io_ring_req *req = arg;
 #ifdef HAVE_FDATASYNC
-	int rc = op->u.fsync.data_only ? fdatasync((int) op->fd) : fsync((int) op->fd);
+	int rc = req->u.fsync.data_only ? fdatasync((int) req->u.fsync.fd) : fsync((int) req->u.fsync.fd);
 #else
-	int rc = fsync((int) op->fd);
+	int rc = fsync((int) req->u.fsync.fd);
 #endif
 	return rc == 0 ? 0 : -errno;
 }
@@ -399,51 +568,50 @@ static zend_result php_io_ring_submit_one(php_io_ring *ring, php_io_ring_req *re
 			op->in_flight = true;
 			break;
 		case PHP_IO_OP_ACCEPT:
-			ior_prep_accept(ctx, sqe, (ior_fd_t) op->fd, op->u.accept.addr, op->u.accept.addrlen,
+			ior_prep_accept(ctx, sqe, (ior_fd_t) op->fd, req->u.sock.addr, req->u.sock.addr ? &req->u.sock.addrlen : NULL,
 					IOR_ACCEPT_CLOEXEC | (ring->fd_nonblock ? IOR_ACCEPT_NONBLOCK : 0));
 			op->in_flight = true;
 			break;
 		case PHP_IO_OP_CONNECT:
-			ior_prep_connect(ctx, sqe, (ior_fd_t) op->fd, op->u.connect.addr, op->u.connect.addrlen);
+			ior_prep_connect(ctx, sqe, (ior_fd_t) op->fd, req->u.sock.addr, req->u.sock.addrlen);
 			op->in_flight = true;
 			break;
 		case PHP_IO_OP_GETADDRINFO:
-			if (ior_prep_work(ctx, sqe, php_io_ring_work_getaddrinfo, op) < 0) {
+			if (ior_prep_work(ctx, sqe, php_io_ring_work_getaddrinfo, req) < 0) {
+				php_io_ring_sqe_void(ctx, sqe);
 				errno = ENOTSUP;
 				return FAILURE;
 			}
-			op->in_flight = true;
 			break;
 		case PHP_IO_OP_GETNAMEINFO:
-			if (ior_prep_work(ctx, sqe, php_io_ring_work_getnameinfo, op) < 0) {
+			if (ior_prep_work(ctx, sqe, php_io_ring_work_getnameinfo, req) < 0) {
+				php_io_ring_sqe_void(ctx, sqe);
 				errno = ENOTSUP;
 				return FAILURE;
 			}
-			op->in_flight = true;
 			break;
 		case PHP_IO_OP_FSYNC:
-			if (ior_prep_work(ctx, sqe, php_io_ring_work_fsync, op) < 0) {
-				php_io_ring_sqe_void(ctx, sqe);
-				errno = ENOTSUP;
-				return FAILURE;
-			}
-			break;
-		case PHP_IO_OP_WAITPID:
-			if (ior_prep_waitpid(ctx, sqe, (ior_pid_t) op->u.waitpid.pid, op->u.waitpid.status, op->u.waitpid.options) < 0) {
+			if (ior_prep_work(ctx, sqe, php_io_ring_work_fsync, req) < 0) {
 				php_io_ring_sqe_void(ctx, sqe);
 				errno = ENOTSUP;
 				return FAILURE;
 			}
 			op->in_flight = true;
 			break;
+		case PHP_IO_OP_WAITPID:
+			if (ior_prep_waitpid(ctx, sqe, (ior_pid_t) op->u.waitpid.pid, &req->u.waitpid.status, op->u.waitpid.options) < 0) {
+				php_io_ring_sqe_void(ctx, sqe);
+				errno = ENOTSUP;
+				return FAILURE;
+			}
+			break;
 		case PHP_IO_OP_SIGWAIT: {
-			int rc = ior_prep_sigwait(ctx, sqe, (const ior_sigset_t *) op->u.sigwait.set, (ior_siginfo_t *) op->u.sigwait.info);
+			int rc = ior_prep_sigwait(ctx, sqe, (const ior_sigset_t *) &req->u.sigwait.set, (ior_siginfo_t *) &req->u.sigwait.info);
 			if (rc < 0) {
 				php_io_ring_sqe_void(ctx, sqe);
 				errno = -rc;
 				return FAILURE;
 			}
-			op->in_flight = true;
 			break;
 		}
 		default:
@@ -589,6 +757,7 @@ static void php_io_ring_req_cancel_or_forget(php_io_ring *ring, php_io_ring_req 
 	if (php_io_ring_foreign(ring)) {
 		req->main_done = true;
 		req->lt_done = true;
+		req->delivered = true;
 		req->orphan_stream = NULL;
 		return;
 	}
@@ -677,8 +846,8 @@ PHPAPI void php_io_ring_drain(php_io_ring *ring, php_stream *stream)
 
 static void php_io_ring_result_from_cqe(php_io_ring_req *req, int32_t res)
 {
-	php_io_op *op = req->op;
 	php_io_op_result *r = &req->result;
+	bool dns = req->type == PHP_IO_OP_GETADDRINFO || req->type == PHP_IO_OP_GETNAMEINFO;
 
 	r->index = req->index;
 	r->error = 0;
@@ -686,9 +855,9 @@ static void php_io_ring_result_from_cqe(php_io_ring_req *req, int32_t res)
 
 	if (res >= 0) {
 		r->status = PHP_IO_DONE;
-		if (op && op->type == PHP_IO_OP_POLL) {
+		if (req->type == PHP_IO_OP_POLL) {
 			r->res = php_io_ring_poll_mask_from_ior((uint32_t) res);
-		} else if (op && (op->type == PHP_IO_OP_GETADDRINFO || op->type == PHP_IO_OP_GETNAMEINFO) && res != 0) {
+		} else if (dns && res != 0) {
 			/* EAI_* codes are the work result as they are */
 			r->error = res;
 			r->res = -1;
@@ -698,7 +867,7 @@ static void php_io_ring_result_from_cqe(php_io_ring_req *req, int32_t res)
 
 	switch (res) {
 		case -ETIME:
-			r->status = op && op->type == PHP_IO_OP_TIMER ? PHP_IO_DONE : PHP_IO_TIMEOUT;
+			r->status = req->type == PHP_IO_OP_TIMER ? PHP_IO_DONE : PHP_IO_TIMEOUT;
 			r->res = 0;
 			break;
 		case -ECANCELED:
@@ -716,13 +885,9 @@ static void php_io_ring_result_from_cqe(php_io_ring_req *req, int32_t res)
 			r->res = -1;
 			break;
 		default:
-			if (op && (op->type == PHP_IO_OP_GETADDRINFO || op->type == PHP_IO_OP_GETNAMEINFO)) {
-				r->status = PHP_IO_DONE;
-				r->error = res;      /* a negative EAI_* code */
-			} else {
-				r->status = PHP_IO_DONE;
-				r->error = -res;
-			}
+			r->status = PHP_IO_DONE;
+			/* A negative EAI_* code for the DNS ops */
+			r->error = dns ? res : -res;
 			r->res = -1;
 			break;
 	}
@@ -732,6 +897,7 @@ static void php_io_ring_result_from_cqe(php_io_ring_req *req, int32_t res)
 static void php_io_ring_req_main_cqe(php_io_ring *ring, php_io_ring_req *req, int32_t res)
 {
 	req->main_done = true;
+	req->main_res = res;
 	if (req->op) {
 		req->op->in_flight = false;
 	}
@@ -782,6 +948,7 @@ static void php_io_ring_group_fold(php_io_ring *ring, php_io_ring_req *req)
 			if (op->u.any.results) {
 				op->u.any.results[n_results] = m->result;
 			}
+			php_io_ring_req_output(m, m->op);
 			n_results++;
 		} else {
 			php_io_ring_req_cancel(ring, m);
@@ -859,6 +1026,9 @@ static uint32_t php_io_ring_deliver(php_io_ring *ring, php_io_queue_completion *
 
 	for (uint32_t i = 0; i < n; i++) {
 		php_io_ring_req *req = ring->ready[i];
+		if (req->type != PHP_IO_OP_ANY) {
+			php_io_ring_req_output(req, req->op);
+		}
 		out[i].op = req->op;
 		out[i].data = req->data;
 		out[i].result = req->result;
@@ -884,6 +1054,9 @@ PHPAPI int php_io_ring_wait(php_io_ring *ring, php_io_queue_completion *out, uin
 		return -1;
 	}
 	zend_hrtime_t limit = ZEND_HRTIME_T_MAX;
+	/* Only orphans: once they settled there is nothing to report, as
+	 * count_pending() told */
+	bool orphans_only = ring->pending == 0 && ring->live;
 
 	if (max == 0) {
 		return 0;
@@ -906,8 +1079,12 @@ PHPAPI int php_io_ring_wait(php_io_ring *ring, php_io_queue_completion *out, uin
 		if (limit != ZEND_HRTIME_T_MAX && zend_hrtime() >= limit) {
 			return 0;
 		}
-		if (ring->pending == 0 && !ring->live) {
-			if (limit == ZEND_HRTIME_T_MAX) {
+		if (ring->pending == 0) {
+			if (ring->live) {
+				orphans_only = true;
+			} else if (orphans_only) {
+				return 0;
+			} else if (limit == ZEND_HRTIME_T_MAX) {
 				errno = EDEADLK;
 				return -1;
 			}
@@ -944,6 +1121,7 @@ PHPAPI void php_io_ring_destroy(php_io_ring *ring)
 		while (ring->live) {
 			php_io_ring_req *req = ring->live;
 			req->orphaned = false;
+			req->delivered = true;
 			if (req->ready) {
 				php_io_ring_list_remove(ring->ready, &ring->n_ready, req);
 			}
@@ -1096,8 +1274,10 @@ PHPAPI php_io_ring *php_io_queue_ring(php_io_queue *q)
 
 PHPAPI php_io_queue *php_io_queue_create_ring(uint32_t entries)
 {
-	/* The hooks put every pollable descriptor in non-blocking mode */
-	php_io_ring *ring = php_io_ring_create(entries, true);
+	/* No IOR_SETUP_FD_NONBLOCK: a userland Io\Ring\Engine may be handed a
+	 * blocking stream, which the thread backend then makes non-blocking
+	 * itself so that the op waits on its poller and stays cancellable */
+	php_io_ring *ring = php_io_ring_create(entries, false);
 	if (!ring) {
 		return NULL;
 	}
