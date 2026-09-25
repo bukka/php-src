@@ -803,16 +803,37 @@ PHPAPI php_socket_t php_network_accept_incoming_ex(php_stream *stream,
 	php_sockaddr_storage sa;
 	socklen_t sl;
 
-	php_deadline deadline;
-	deadline = php_io_deadline_from_timeval(timeout);
-	sl = sizeof(sa);
-	clisock = php_io_accept(stream, srvsock, (struct sockaddr*)&sa, &sl, &deadline);
+	if (php_io_hooks_active()) {
+		php_deadline deadline;
+		deadline = php_io_deadline_from_timeval(timeout);
+		sl = sizeof(sa);
+		clisock = php_io_accept(stream, srvsock, (struct sockaddr*)&sa, &sl, &deadline);
 
-	if (clisock == SOCK_ERR) {
-		error = php_socket_errno();
-		if (error == ETIMEDOUT) {
-			error = PHP_TIMEOUT_ERROR_VALUE;
+		if (clisock == SOCK_ERR) {
+			error = php_socket_errno();
+			if (error == ETIMEDOUT) {
+				error = PHP_TIMEOUT_ERROR_VALUE;
+			}
 		}
+	} else {
+		/* Without a provider a signal interrupts the wait */
+		do {
+			error = 0;
+			int n = php_pollfd_for(srvsock, PHP_POLLREADABLE, timeout);
+			if (n == 0) {
+				error = PHP_TIMEOUT_ERROR_VALUE;
+				break;
+			}
+			if (n < 0) {
+				error = php_socket_errno();
+				break;
+			}
+			sl = sizeof(sa);
+			clisock = accept(srvsock, (struct sockaddr*)&sa, &sl);
+			if (clisock == SOCK_ERR) {
+				error = php_socket_errno();
+			}
+		} while (clisock == SOCK_ERR && PHP_IS_TRANSIENT_ERROR(error));
 	}
 
 	if (clisock != SOCK_ERR) {
