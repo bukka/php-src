@@ -91,6 +91,7 @@ struct php_io_poll_context_object {
 	php_poll_ctx *ctx;
 	HashTable *watchers; /* Maps fd -> watcher object */
 	HashTable *timer_watchers; /* Maps watcher pointer key -> watcher object */
+	HashTable *removed; /* Watchers retired for onWatcherRemoved(), delivered by the next wait() */
 	zend_fcall_info_cache on_watcher_removed_fcc;
 	zend_object std;
 };
@@ -1298,6 +1299,7 @@ static zend_object *php_io_poll_context_create_object(zend_class_entry *ce)
 	intern->ctx = NULL;
 	intern->watchers = NULL;
 	intern->timer_watchers = NULL;
+	intern->removed = NULL;
 	intern->on_watcher_removed_fcc = empty_fcall_info_cache;
 
 	return &intern->std;
@@ -1357,8 +1359,8 @@ static void php_io_poll_handle_unwatch(
 }
 
 /* The single removal path: drops the backend registration, both reverse
- * lookups and the context's reference. notify reports a removal the caller
- * did not initiate to onWatcherRemoved(). */
+ * lookups and the context's reference. notify queues a removal the caller
+ * did not initiate for onWatcherRemoved(); no user code runs here. */
 static void php_io_poll_context_retire_watcher(
 		php_io_poll_context_object *context, php_io_poll_watcher_object *watcher, bool notify)
 {
@@ -1384,12 +1386,60 @@ static void php_io_poll_context_retire_watcher(
 	}
 
 	if (notify && ZEND_FCC_INITIALIZED(context->on_watcher_removed_fcc)) {
+		if (!context->removed) {
+			context->removed = emalloc(sizeof(HashTable));
+			zend_hash_init(context->removed, 4, NULL, ZVAL_PTR_DTOR, 0);
+		}
 		zval watcher_zv;
-		ZVAL_OBJ(&watcher_zv, &watcher->std);
-		zend_call_known_fcc(&context->on_watcher_removed_fcc, NULL, 1, &watcher_zv, NULL);
+		ZVAL_OBJ_COPY(&watcher_zv, &watcher->std);
+		zend_hash_next_index_insert_new(context->removed, &watcher_zv);
 	}
 
 	OBJ_RELEASE(&watcher->std);
+}
+
+/* Runs the queued onWatcherRemoved() calls, stopping at the first exception
+ * with the rest still queued */
+static zend_result php_io_poll_context_deliver_removed(php_io_poll_context_object *context)
+{
+	while (context->removed && zend_hash_num_elements(context->removed)) {
+		zend_ulong idx = 0;
+		zval *first = NULL, watcher_zv;
+		ZEND_HASH_FOREACH_NUM_KEY_VAL(context->removed, idx, first) {
+			break;
+		} ZEND_HASH_FOREACH_END();
+		ZVAL_COPY(&watcher_zv, first);
+		zend_hash_index_del(context->removed, idx);
+		if (zend_hash_num_elements(context->removed) == 0) {
+			zend_hash_clean(context->removed);
+		}
+
+		if (ZEND_FCC_INITIALIZED(context->on_watcher_removed_fcc)) {
+			zend_call_known_fcc(&context->on_watcher_removed_fcc, NULL, 1, &watcher_zv, NULL);
+		}
+		zval_ptr_dtor(&watcher_zv);
+		if (EG(exception)) {
+			return FAILURE;
+		}
+	}
+	return SUCCESS;
+}
+
+/* Retires every watcher of the list; they are kept alive until the loop is
+ * done so that releasing one runs no user code in the middle of it */
+static void php_io_poll_retire_watchers(php_io_poll_watcher_object **list, uint32_t n)
+{
+	for (uint32_t i = 0; i < n; i++) {
+		php_io_poll_watcher_object *watcher = list[i];
+		watcher->closed = true;
+		if (watcher->active && watcher->context) {
+			php_io_poll_context_retire_watcher(watcher->context, watcher, true);
+		}
+	}
+	for (uint32_t i = 0; i < n; i++) {
+		OBJ_RELEASE(&list[i]->std);
+	}
+	efree(list);
 }
 
 /* Called from php_stream_free() while the fd is still open */
@@ -1398,17 +1448,19 @@ PHPAPI void php_io_poll_stream_notify_close(php_stream *stream)
 	HashTable *watchers = stream->poll_watchers;
 	stream->poll_watchers = NULL;
 
+	uint32_t n = 0;
+	php_io_poll_watcher_object **list = safe_emalloc(zend_hash_num_elements(watchers), sizeof(*list), 0);
 	ZEND_HASH_FOREACH_VAL(watchers, zval *zv) {
 		php_io_poll_watcher_object *watcher = Z_PTR_P(zv);
 		watcher->stream = NULL;
-		watcher->closed = true;
-		if (watcher->context) {
-			php_io_poll_context_retire_watcher(watcher->context, watcher, true);
-		}
+		GC_ADDREF(&watcher->std);
+		list[n++] = watcher;
 	} ZEND_HASH_FOREACH_END();
 
 	zend_hash_destroy(watchers);
 	pefree(watchers, stream->is_persistent);
+
+	php_io_poll_retire_watchers(list, n);
 }
 
 /* Object Destruction Functions */
@@ -1465,6 +1517,11 @@ static void php_io_poll_context_free_object(zend_object *obj)
 		efree(intern->timer_watchers);
 	}
 
+	if (intern->removed) {
+		zend_hash_destroy(intern->removed);
+		efree(intern->removed);
+	}
+
 	if (ZEND_FCC_INITIALIZED(intern->on_watcher_removed_fcc)) {
 		zend_fcc_dtor(&intern->on_watcher_removed_fcc);
 	}
@@ -1498,6 +1555,11 @@ static HashTable *php_io_poll_context_get_gc(zend_object *obj, zval **table, int
 	}
 	if (intern->timer_watchers) {
 		ZEND_HASH_FOREACH_VAL(intern->timer_watchers, zval *zv) {
+			zend_get_gc_buffer_add_zval(gc_buffer, zv);
+		} ZEND_HASH_FOREACH_END();
+	}
+	if (intern->removed) {
+		ZEND_HASH_FOREACH_VAL(intern->removed, zval *zv) {
 			zend_get_gc_buffer_add_zval(gc_buffer, zv);
 		} ZEND_HASH_FOREACH_END();
 	}
@@ -1970,9 +2032,6 @@ PHP_METHOD(Io_Poll_Context, add)
 			RETURN_THROWS();
 		}
 		php_io_poll_context_retire_watcher(intern, existing, true);
-		if (EG(exception)) {
-			RETURN_THROWS();
-		}
 	}
 
 	/* Create watcher object */
@@ -2072,6 +2131,10 @@ PHP_METHOD(Io_Poll_Context, wait)
 		RETURN_THROWS();
 	}
 
+	if (php_io_poll_context_deliver_removed(intern) == FAILURE) {
+		RETURN_THROWS();
+	}
+
 	php_poll_event *events = safe_emalloc((size_t) max_events, sizeof(*events), 0);
 	int num_events = php_poll_wait(intern->ctx, events, (int) max_events, timeout ? &timeout_ts : NULL);
 
@@ -2151,17 +2214,18 @@ PHPAPI void php_io_poll_handle_remove_from_all_contexts(zend_object *handle_obj)
 	HashTable *watching = handle->watching;
 	handle->watching = NULL;
 
+	uint32_t n = 0;
+	php_io_poll_watcher_object **list = safe_emalloc(zend_hash_num_elements(watching), sizeof(*list), 0);
 	ZEND_HASH_FOREACH_VAL(watching, zval *zv) {
 		php_io_poll_watcher_object *watcher = (php_io_poll_watcher_object *) Z_PTR_P(zv);
-		if (!watcher->active || !watcher->context) {
-			continue;
-		}
-		watcher->closed = true;
-		php_io_poll_context_retire_watcher(watcher->context, watcher, true);
+		GC_ADDREF(&watcher->std);
+		list[n++] = watcher;
 	} ZEND_HASH_FOREACH_END();
 
 	zend_hash_destroy(watching);
 	efree(watching);
+
+	php_io_poll_retire_watchers(list, n);
 }
 
 /* Initialize the stream poll classes - add to PHP_MINIT_FUNCTION */
