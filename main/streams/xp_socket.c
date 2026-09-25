@@ -233,7 +233,7 @@ static int php_sockop_stat(php_stream *stream, php_stream_statbuf *ssb)
 }
 
 /* The descriptor is non-blocking: on a blocking stream (dl set) a call that
- * would block waits for readiness as a Poll op, up to the stream's timeout */
+ * would block waits for readiness as a Poll op */
 static inline int sock_sendto(php_stream *stream, php_netstream_data_t *sock, const char *buf, size_t buflen, int flags,
 		struct sockaddr *addr, socklen_t addrlen, php_deadline *dl
 		)
@@ -248,14 +248,14 @@ static inline int sock_sendto(php_stream *stream, php_netstream_data_t *sock, co
 	return (ret == SOCK_CONN_ERR) ? -1 : ret;
 }
 
-/* The stream's timeout as the deadline of a blocking stream's transport
- * call; NULL for a non-blocking stream, which never waits */
+/* A blocking stream's transport call waits without a timeout, like the
+ * blocking syscall did; NULL for a non-blocking stream, which never waits */
 static inline php_deadline *sock_xport_deadline(php_netstream_data_t *sock, php_deadline *dl)
 {
 	if (!sock->is_blocked) {
 		return NULL;
 	}
-	*dl = php_io_deadline_from_timeval(&sock->timeout);
+	php_deadline_init_infinite(dl);
 	return dl;
 }
 
