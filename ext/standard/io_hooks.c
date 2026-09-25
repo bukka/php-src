@@ -1332,9 +1332,9 @@ PHP_FUNCTION(Io_Hooks_set_hooks)
 		zend_fcall_info_cache caps_fcc;
 		php_io_hooks_method_fcc(hooks_obj, "getCapabilities", &caps_fcc);
 		ZVAL_UNDEF(&capabilities);
-		FG(io_hooks_locked)++;
+		php_io_hooks_lock();
 		zend_call_known_fcc(&caps_fcc, &capabilities, 0, NULL, NULL);
-		FG(io_hooks_locked)--;
+		php_io_hooks_unlock();
 		zend_fcc_dtor(&caps_fcc);
 		if (EG(exception)) {
 			zval_ptr_dtor(&capabilities);

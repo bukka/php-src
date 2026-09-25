@@ -158,6 +158,10 @@ PHPAPI zend_result php_io_hooks_register(const php_io_hooks *hooks, size_t size,
 PHPAPI const php_io_hooks *php_io_hooks_current(void **data);
 PHPAPI bool php_io_hooks_active(void);
 PHPAPI void php_io_hooks_request_shutdown(void);
+/* Around the provider's getCapabilities, add, remove and dtor: no
+ * set_hooks() and no fiber switch until they returned */
+PHPAPI void php_io_hooks_lock(void);
+PHPAPI void php_io_hooks_unlock(void);
 
 /* Set by the userland bridge: invalidates the Io\Operation wrapper of an
  * op that ended, so a provider keeping the object cannot reach the op. */

@@ -22,6 +22,7 @@
 # include <arpa/inet.h>
 #endif
 #include <time.h>
+#include "zend_fibers.h"
 #ifndef PHP_WIN32
 # include <sys/wait.h>
 # include <signal.h>
@@ -207,15 +208,27 @@ struct _php_io_persistent_op {
 
 static void php_io_op_detach_zobj(php_io_op *op);
 
+PHPAPI void php_io_hooks_lock(void)
+{
+	FG(io_hooks_locked)++;
+	zend_fiber_switch_block();
+}
+
+PHPAPI void php_io_hooks_unlock(void)
+{
+	zend_fiber_switch_unblock();
+	FG(io_hooks_locked)--;
+}
+
 static void php_io_persistent_register(php_io_persistent_op *p)
 {
 	php_io_hooks_state *state = FG(io_hooks);
 	if (!p->registered && state) {
 		p->registered = true;
 		if (state->hooks.add) {
-			FG(io_hooks_locked)++;
+			php_io_hooks_lock();
 			state->hooks.add(state->data, &p->op);
-			FG(io_hooks_locked)--;
+			php_io_hooks_unlock();
 		}
 	}
 }
@@ -255,9 +268,9 @@ static void php_io_persistent_free(php_io_persistent_op *p)
 	php_io_hooks_state *state = FG(io_hooks);
 
 	if (p->registered && state && state->hooks.remove) {
-		FG(io_hooks_locked)++;
+		php_io_hooks_lock();
 		state->hooks.remove(state->data, &p->op);
-		FG(io_hooks_locked)--;
+		php_io_hooks_unlock();
 	}
 	p->registered = false;
 	if (p->op.queue) {
@@ -323,9 +336,9 @@ PHPAPI zend_result php_io_hooks_register(const php_io_hooks *hooks, size_t size,
 				p->registered = false;
 			}
 			if (state->hooks.dtor) {
-				FG(io_hooks_locked)++;
+				php_io_hooks_lock();
 				state->hooks.dtor(state->data);
-				FG(io_hooks_locked)--;
+				php_io_hooks_unlock();
 			}
 			efree(state);
 		}
