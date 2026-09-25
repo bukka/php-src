@@ -215,8 +215,10 @@ PHPAPI int php_io_getnameinfo(const struct sockaddr *addr, socklen_t addrlen, in
 /* FAILURE when cancelled; *interrupted (may be NULL) tells a signal ended it early */
 PHPAPI zend_result php_io_sleep(php_deadline dl, bool *interrupted);
 /* Like waitpid(2) and sigtimedwait(2); a timed out signal wait fails with EAGAIN */
+#ifndef PHP_WIN32
 PHPAPI pid_t php_io_waitpid(zend_object *handle, pid_t pid, int *status, int options, php_deadline *dl);
 PHPAPI int php_io_sigwait(zend_object *handle, const php_sigset_t *set, php_siginfo_t *info, php_deadline *dl);
+#endif
 
 /* Active php_io_run() frames; pcntl_fork() refuses while any is in flight */
 PHPAPI uint32_t php_io_ops_in_flight(void);
