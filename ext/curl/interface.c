@@ -2622,8 +2622,8 @@ static void php_curl_socket_table_free(php_curl *ch)
 	}
 }
 
-/* curl_exec() on the multi socket API: every iteration waits with one Any
- * op, a persistent Poll member per socket plus a Timer member for libcurl's
+/* curl_exec() under a provider, on the multi socket API: every iteration
+ * waits with one Any op, a persistent Poll member per socket plus a Timer member for libcurl's
  * timeout, and acts on what was reported. */
 static CURLcode php_curl_exec_multi(php_curl *ch)
 {
@@ -2802,7 +2802,11 @@ PHP_FUNCTION(curl_exec)
 
 	_php_curl_cleanup_handle(ch);
 
-	error = php_curl_exec_multi(ch);
+	if (php_io_hooks_active()) {
+		error = php_curl_exec_multi(ch);
+	} else {
+		error = curl_easy_perform(ch->cp);
+	}
 	SAVE_CURL_ERROR(ch, error);
 
 	if (error != CURLE_OK) {

@@ -329,6 +329,10 @@ PHP_FUNCTION(curl_multi_select)
 			SAVE_CURLM_ERROR(mh, error);
 			RETURN_LONG(-1);
 		}
+		/* curl_multi_wait() does not wait without descriptors either */
+		if (n_fds == 0) {
+			RETURN_LONG(0);
+		}
 		long wait_ms = (long) (timeout * 1000.0);
 		long curl_ms = -1;
 		if (curl_multi_timeout(mh->multi, &curl_ms) == CURLM_OK && curl_ms >= 0 && curl_ms < wait_ms) {
