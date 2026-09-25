@@ -940,6 +940,12 @@ typedef struct {
 } php_io_poll_signal_handle_data;
 
 #ifndef PHP_WIN32
+# ifdef ZTS
+#  define php_io_poll_sigmask pthread_sigmask
+# else
+#  define php_io_poll_sigmask sigprocmask
+# endif
+
 /* Live handles per signal, and the signals the handles blocked themselves:
  * a signal is unblocked again when the last handle for it goes, and never
  * when the process had it blocked before any handle */
@@ -948,7 +954,7 @@ ZEND_TLS sigset_t php_io_poll_signals_blocked_by_handles;
 
 PHPAPI void php_io_poll_signal_child_mask(sigset_t *mask)
 {
-	sigprocmask(SIG_BLOCK, NULL, mask);
+	php_io_poll_sigmask(SIG_BLOCK, NULL, mask);
 	for (int signo = 1; signo < NSIG; signo++) {
 		if (sigismember(&php_io_poll_signals_blocked_by_handles, signo) == 1) {
 			sigdelset(mask, signo);
@@ -991,7 +997,7 @@ static void php_io_poll_signal_handle_cleanup(php_poll_handle_object *handle)
 			}
 		}
 		if (any) {
-			sigprocmask(SIG_UNBLOCK, &unblock, NULL);
+			php_io_poll_sigmask(SIG_UNBLOCK, &unblock, NULL);
 		}
 #endif
 		if (data->infos) {
@@ -1052,7 +1058,7 @@ static void php_io_poll_signal_handle_init(php_poll_handle_object *handle, const
 #ifndef PHP_WIN32
 	/* Block what is not blocked yet, so the signals queue for the source */
 	sigset_t old;
-	if (sigprocmask(SIG_BLOCK, set, &old) == 0) {
+	if (php_io_poll_sigmask(SIG_BLOCK, set, &old) == 0) {
 		for (int signo = 1; signo < NSIG; signo++) {
 			if (sigismember(set, signo) != 1) {
 				continue;
@@ -1099,6 +1105,29 @@ PHPAPI int php_io_poll_signal_handle_take(zend_object *handle_obj, const php_sig
 	return 0;
 }
 
+/* SIGKILL and SIGSTOP cannot be blocked, and blocking a signal raised by a
+ * fault is undefined behaviour */
+static bool php_io_poll_signal_unwatchable(zend_long signo)
+{
+	switch (signo) {
+#ifdef SIGKILL
+		case SIGKILL:
+#endif
+#ifdef SIGSTOP
+		case SIGSTOP:
+#endif
+#ifdef SIGBUS
+		case SIGBUS:
+#endif
+		case SIGSEGV:
+		case SIGFPE:
+		case SIGILL:
+			return true;
+		default:
+			return false;
+	}
+}
+
 PHP_METHOD(Io_Poll_SignalHandle, __construct)
 {
 	HashTable *signals;
@@ -1121,14 +1150,22 @@ PHP_METHOD(Io_Poll_SignalHandle, __construct)
 	php_sigemptyset(&set);
 	zval *entry;
 	ZEND_HASH_FOREACH_VAL(signals, entry) {
-		bool failed;
-		zend_long signo = zval_try_get_long(entry, &failed);
-		if (failed) {
+		ZVAL_DEREF(entry);
+		if (Z_TYPE_P(entry) != IS_LONG) {
 			zend_argument_type_error(1, "signals must be of type int, %s given", zend_zval_value_name(entry));
 			RETURN_THROWS();
 		}
-		if (signo < 1 || signo >= PHP_NSIG || php_sigaddset(&set, (int) signo) != 0) {
+		zend_long signo = Z_LVAL_P(entry);
+		if (signo < 1 || signo >= PHP_NSIG) {
 			zend_argument_value_error(1, "signals must be between 1 and %d", PHP_NSIG - 1);
+			RETURN_THROWS();
+		}
+		if (php_io_poll_signal_unwatchable(signo)) {
+			zend_argument_value_error(1, "must not contain signal " ZEND_LONG_FMT ", which cannot be blocked", signo);
+			RETURN_THROWS();
+		}
+		if (php_sigaddset(&set, (int) signo) != 0) {
+			zend_argument_value_error(1, "must not contain signal " ZEND_LONG_FMT ", which is reserved", signo);
 			RETURN_THROWS();
 		}
 	} ZEND_HASH_FOREACH_END();
@@ -2172,7 +2209,15 @@ PHP_METHOD(Io_Poll_Context, wait)
 	for (int i = 0; i < num_events; i++) {
 		php_io_poll_watcher_object *watcher = (php_io_poll_watcher_object *) events[i].data;
 		if (watcher) {
-			watcher->triggered_events = php_io_poll_handle_fired(watcher->handle, events[i].revents);
+			uint32_t triggered = php_io_poll_handle_fired(watcher->handle, events[i].revents);
+			if (!watcher->timer && php_io_poll_handle_exhausted(watcher->handle)) {
+				/* Reported once; the watcher stays until it is removed */
+				php_poll_remove(intern->ctx, (int) watcher->fd);
+			}
+			if (!triggered) {
+				continue;
+			}
+			watcher->triggered_events = triggered;
 
 			zval watcher_zv;
 			ZVAL_OBJ(&watcher_zv, &watcher->std);

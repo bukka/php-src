@@ -27,6 +27,7 @@
 
 #include "php.h"
 #include "main/php_io_hooks.h"
+#include "ext/standard/io_poll.h"
 #include "ext/standard/info.h"
 #include "php_signal.h"
 #include "php_ticks.h"
@@ -667,9 +668,32 @@ PHP_FUNCTION(pcntl_wstopsig)
 }
 /* }}} */
 
+/* Signals blocked for a SignalHandle are not the new program's business;
+ * the old mask comes back if the exec fails */
+static void pcntl_exec_set_mask(sigset_t *old_mask)
+{
+	sigset_t mask;
+	php_io_poll_signal_child_mask(&mask);
+#ifdef ZTS
+	pthread_sigmask(SIG_SETMASK, &mask, old_mask);
+#else
+	sigprocmask(SIG_SETMASK, &mask, old_mask);
+#endif
+}
+
+static void pcntl_exec_restore_mask(const sigset_t *old_mask)
+{
+#ifdef ZTS
+	pthread_sigmask(SIG_SETMASK, old_mask, NULL);
+#else
+	sigprocmask(SIG_SETMASK, old_mask, NULL);
+#endif
+}
+
 /* {{{ Executes specified program in current process space as defined by exec(2) */
 PHP_FUNCTION(pcntl_exec)
 {
+	sigset_t old_mask;
 	zval *args = NULL;
 	HashTable *env_vars_ht = NULL;
 	zval *element;
@@ -767,8 +791,10 @@ PHP_FUNCTION(pcntl_exec)
 		} ZEND_HASH_FOREACH_END();
 		*(pair) = NULL;
 
+		pcntl_exec_set_mask(&old_mask);
 		if (execve(path, argv, envp) == -1) {
 			PCNTL_G(last_error) = errno;
+			pcntl_exec_restore_mask(&old_mask);
 			php_error_docref(NULL, E_WARNING, "Error has occurred: (errno %d) %s", errno, strerror(errno));
 		}
 
@@ -778,8 +804,10 @@ cleanup_env_vars:
 		efree(envp);
 	} else {
 
+		pcntl_exec_set_mask(&old_mask);
 		if (execv(path, argv) == -1) {
 			PCNTL_G(last_error) = errno;
+			pcntl_exec_restore_mask(&old_mask);
 			php_error_docref(NULL, E_WARNING, "Error has occurred: (errno %d) %s", errno, strerror(errno));
 		}
 	}
