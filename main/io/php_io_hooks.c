@@ -1069,9 +1069,11 @@ static ssize_t php_io_file_op(php_stream *stream, int fd, php_deadline *dl, bool
 				break;
 			}
 		}
-		do {
+		ret = syscall_fn(fd, buf, len, offset);
+		if (ret < 0 && errno == EINTR) {
+			/* Retried once; a second signal is left to the script */
 			ret = syscall_fn(fd, buf, len, offset);
-		} while (ret < 0 && errno == EINTR);
+		}
 		break;
 	}
 
