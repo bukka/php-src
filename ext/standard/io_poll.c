@@ -873,8 +873,12 @@ PHP_METHOD(Io_Poll_ProcessHandle, __construct)
 		zend_throw_error(NULL, "Io\\Poll\\ProcessHandle object is already constructed");
 		RETURN_THROWS();
 	}
-	if (pid <= 0 || pid > INT_MAX) {
+	if (pid <= 0) {
 		zend_argument_value_error(1, "must be greater than 0");
+		RETURN_THROWS();
+	}
+	if (pid > INT_MAX) {
+		zend_argument_value_error(1, "must be less than or equal to %d", INT_MAX);
 		RETURN_THROWS();
 	}
 	if (php_io_poll_process_handle_init(intern, (pid_t) pid, 1) == FAILURE) {

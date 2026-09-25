@@ -9,10 +9,12 @@ if (!Io\Poll\Backend::Auto->supportsProcessHandles()) die("skip no process handl
 ?>
 --FILE--
 <?php
-try {
-    new Io\Poll\ProcessHandle(0);
-} catch (ValueError $e) {
-    echo $e->getMessage(), "\n";
+foreach ([0, PHP_INT_MAX] as $pid) {
+    try {
+        new Io\Poll\ProcessHandle($pid);
+    } catch (ValueError $e) {
+        echo $e->getMessage(), "\n";
+    }
 }
 
 $ctx = new Io\Poll\Context();
@@ -38,8 +40,9 @@ var_dump(pcntl_wifexited($status), pcntl_wexitstatus($status));
 var_dump(proc_get_status($proc)['running'], proc_close($proc));
 $watcher->remove();
 ?>
---EXPECT--
+--EXPECTF--
 Io\Poll\ProcessHandle::__construct(): Argument #1 ($pid) must be greater than 0
+Io\Poll\ProcessHandle::__construct(): Argument #1 ($pid) must be less than or equal to %d
 bool(true)
 NULL
 Io\Poll\Context::add(): Argument #2 ($events) must be Event::Process for a ProcessHandle
