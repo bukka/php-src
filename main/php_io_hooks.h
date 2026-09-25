@@ -227,6 +227,17 @@ static inline php_deadline php_io_deadline_from_timeval(const struct timeval *tv
 	php_deadline dl;
 	if (tv == NULL || tv->tv_sec < 0) {
 		php_deadline_init_infinite(&dl);
+	} else if (tv->tv_usec < 0 || tv->tv_usec > 999999) {
+		/* Out of range microseconds count against the seconds, never below zero */
+		struct timeval norm = { .tv_sec = tv->tv_sec + tv->tv_usec / 1000000, .tv_usec = tv->tv_usec % 1000000 };
+		if (norm.tv_usec < 0) {
+			norm.tv_usec += 1000000;
+			norm.tv_sec--;
+		}
+		if (norm.tv_sec < 0) {
+			norm.tv_sec = norm.tv_usec = 0;
+		}
+		php_deadline_init(&dl, &norm);
 	} else {
 		php_deadline_init(&dl, (struct timeval *) tv);
 	}

@@ -127,11 +127,12 @@ static ssize_t php_sockop_read(php_stream *stream, char *buf, size_t count)
 	sock->timeout_event = false;
 
 	if (sock->is_blocked) {
-		bool has_buffered_data = stream->has_buffered_data;
+		/* With data already buffered or a zero timeout, only check whether more is there */
+		bool dont_wait = stream->has_buffered_data
+				|| (sock->timeout.tv_sec == 0 && sock->timeout.tv_usec == 0);
 
-		/* With data already buffered, only check whether more is there */
 		php_deadline deadline;
-		if (has_buffered_data) {
+		if (dont_wait) {
 			php_deadline_init_nonblock(&deadline);
 		} else {
 			deadline = php_io_deadline_from_timeval(&sock->timeout);
@@ -139,9 +140,12 @@ static ssize_t php_sockop_read(php_stream *stream, char *buf, size_t count)
 
 		nr_bytes = php_io_recv(stream, sock->socket, buf, XP_SOCK_BUF_SIZE(count), 0, &deadline);
 		err = php_socket_errno();
-		if (nr_bytes < 0 && (err == ETIMEDOUT || (has_buffered_data && PHP_IS_TRANSIENT_ERROR(err)))) {
+		if (nr_bytes < 0 && err == ETIMEDOUT) {
+			if (dont_wait) {
+				return 0;
+			}
 			sock->timeout_event = true;
-			return has_buffered_data ? 0 : -1;
+			return -1;
 		}
 	} else {
 		nr_bytes = recv(sock->socket, buf, XP_SOCK_BUF_SIZE(count), 0);
