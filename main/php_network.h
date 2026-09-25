@@ -292,7 +292,16 @@ BEGIN_EXTERN_C()
 PHPAPI int php_network_getaddresses(const char *host, int socktype, struct sockaddr ***sal, zend_string **error_string);
 PHPAPI void php_network_freeaddresses(struct sockaddr **sal);
 
-PHPAPI php_socket_t php_network_connect_socket_to_host_ex(php_stream *stream, php_socket_t *current, const char *host, unsigned short port,
+PHPAPI php_socket_t php_network_connect_socket_to_host_ex(const char *host, unsigned short port,
+		int socktype, int asynchronous, struct timeval *timeout, zend_string **error_string,
+		int *error_code, const char *bindto, unsigned short bindport, long sockopts, php_sockvals *sockvals
+		);
+
+/* The *_stream variants take the stream the socket belongs to (NULL for none)
+ * for the IO hooks. current, if not NULL, holds the socket being connected
+ * while the connect waits, so the stream's handle can resolve it. */
+PHPAPI php_socket_t php_network_connect_socket_to_host_stream(php_stream *stream, php_socket_t *current,
+		const char *host, unsigned short port,
 		int socktype, int asynchronous, struct timeval *timeout, zend_string **error_string,
 		int *error_code, const char *bindto, unsigned short bindport, long sockopts, php_sockvals *sockvals
 		);
@@ -302,7 +311,15 @@ PHPAPI php_socket_t php_network_connect_socket_to_host(const char *host, unsigne
 		int *error_code, const char *bindto, unsigned short bindport, long sockopts
 		);
 
-PHPAPI int php_network_connect_socket(php_stream *stream,
+PHPAPI int php_network_connect_socket(php_socket_t sockfd,
+		const struct sockaddr *addr,
+		socklen_t addrlen,
+		int asynchronous,
+		struct timeval *timeout,
+		zend_string **error_string,
+		int *error_code);
+
+PHPAPI int php_network_connect_socket_stream(php_stream *stream,
 		php_socket_t sockfd,
 		const struct sockaddr *addr,
 		socklen_t addrlen,
@@ -312,7 +329,7 @@ PHPAPI int php_network_connect_socket(php_stream *stream,
 		int *error_code);
 
 #define php_connect_nonb(sock, addr, addrlen, timeout) \
-	php_network_connect_socket(NULL, (sock), (addr), (addrlen), 0, (timeout), NULL, NULL)
+	php_network_connect_socket((sock), (addr), (addrlen), 0, (timeout), NULL, NULL)
 
 PHPAPI php_socket_t php_network_bind_socket_to_local_addr_ex(const char *host, unsigned port,
 		int socktype, long sockopts, php_sockvals *sockvals, zend_string **error_string, int *error_code
@@ -322,7 +339,27 @@ PHPAPI php_socket_t php_network_bind_socket_to_local_addr(const char *host, unsi
 		int socktype, long sockopts, zend_string **error_string, int *error_code
 		);
 
-PHPAPI php_socket_t php_network_accept_incoming_ex(php_stream *stream,
+PHPAPI php_socket_t php_network_accept_incoming_ex(php_socket_t srvsock,
+		zend_string **textaddr,
+		struct sockaddr **addr,
+		socklen_t *addrlen,
+		struct timeval *timeout,
+		zend_string **error_string,
+		int *error_code,
+		php_sockvals *sockvals
+		);
+
+PHPAPI php_socket_t php_network_accept_incoming(php_socket_t srvsock,
+		zend_string **textaddr,
+		struct sockaddr **addr,
+		socklen_t *addrlen,
+		struct timeval *timeout,
+		zend_string **error_string,
+		int *error_code,
+		int tcp_nodelay
+		);
+
+PHPAPI php_socket_t php_network_accept_incoming_stream_ex(php_stream *stream,
 		php_socket_t srvsock,
 		zend_string **textaddr,
 		struct sockaddr **addr,
@@ -333,7 +370,7 @@ PHPAPI php_socket_t php_network_accept_incoming_ex(php_stream *stream,
 		php_sockvals *sockvals
 		);
 
-PHPAPI php_socket_t php_network_accept_incoming(php_stream *stream,
+PHPAPI php_socket_t php_network_accept_incoming_stream(php_stream *stream,
 		php_socket_t srvsock,
 		zend_string **textaddr,
 		struct sockaddr **addr,

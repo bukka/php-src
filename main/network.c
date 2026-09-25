@@ -329,8 +329,8 @@ static inline void php_network_set_limit_time(struct timeval *limit_time,
  * Optionally, the connect can be made asynchronously, which will implicitly
  * enable non-blocking mode on the socket.
  * */
-/* {{{ php_network_connect_socket */
-PHPAPI int php_network_connect_socket(php_stream *stream,
+/* {{{ php_network_connect_socket_stream */
+PHPAPI int php_network_connect_socket_stream(php_stream *stream,
 		php_socket_t sockfd,
 		const struct sockaddr *addr,
 		socklen_t addrlen,
@@ -391,6 +391,18 @@ PHPAPI int php_network_connect_socket(php_stream *stream,
 		}
 	}
 	return ret;
+}
+
+PHPAPI int php_network_connect_socket(php_socket_t sockfd,
+		const struct sockaddr *addr,
+		socklen_t addrlen,
+		int asynchronous,
+		struct timeval *timeout,
+		zend_string **error_string,
+		int *error_code)
+{
+	return php_network_connect_socket_stream(NULL, sockfd, addr, addrlen, asynchronous, timeout,
+			error_string, error_code);
 }
 /* }}} */
 
@@ -787,7 +799,7 @@ PHPAPI int php_network_get_sock_name(php_socket_t sock,
  * version of the address will be emalloc'd and returned.
  * */
 
-PHPAPI php_socket_t php_network_accept_incoming_ex(php_stream *stream,
+PHPAPI php_socket_t php_network_accept_incoming_stream_ex(php_stream *stream,
 		php_socket_t srvsock,
 		zend_string **textaddr,
 		struct sockaddr **addr,
@@ -866,7 +878,21 @@ PHPAPI php_socket_t php_network_accept_incoming_ex(php_stream *stream,
 	return clisock;
 }
 
-PHPAPI php_socket_t php_network_accept_incoming(php_stream *stream,
+PHPAPI php_socket_t php_network_accept_incoming_ex(php_socket_t srvsock,
+		zend_string **textaddr,
+		struct sockaddr **addr,
+		socklen_t *addrlen,
+		struct timeval *timeout,
+		zend_string **error_string,
+		int *error_code,
+		php_sockvals *sockvals
+		)
+{
+	return php_network_accept_incoming_stream_ex(NULL, srvsock, textaddr, addr, addrlen, timeout, error_string,
+			error_code, sockvals);
+}
+
+PHPAPI php_socket_t php_network_accept_incoming_stream(php_stream *stream,
 		php_socket_t srvsock,
 		zend_string **textaddr,
 		struct sockaddr **addr,
@@ -879,8 +905,22 @@ PHPAPI php_socket_t php_network_accept_incoming(php_stream *stream,
 {
 	php_sockvals sockvals = { .mask = tcp_nodelay ? PHP_SOCKVAL_TCP_NODELAY : 0 };
 
-	return php_network_accept_incoming_ex(stream, srvsock, textaddr, addr, addrlen, timeout, error_string,
+	return php_network_accept_incoming_stream_ex(stream, srvsock, textaddr, addr, addrlen, timeout, error_string,
 			error_code, &sockvals);
+}
+
+PHPAPI php_socket_t php_network_accept_incoming(php_socket_t srvsock,
+		zend_string **textaddr,
+		struct sockaddr **addr,
+		socklen_t *addrlen,
+		struct timeval *timeout,
+		zend_string **error_string,
+		int *error_code,
+		int tcp_nodelay
+		)
+{
+	return php_network_accept_incoming_stream(NULL, srvsock, textaddr, addr, addrlen, timeout, error_string,
+			error_code, tcp_nodelay);
 }
 
 /* Connect to a remote host using an interruptible connect with optional timeout.
@@ -888,7 +928,7 @@ PHPAPI php_socket_t php_network_accept_incoming(php_stream *stream,
  * enable non-blocking mode on the socket.
  * Returns the connected (or connecting) socket, or -1 on failure.
  * */
-php_socket_t php_network_connect_socket_to_host_ex(php_stream *stream, php_socket_t *current, const char *host, unsigned short port,
+php_socket_t php_network_connect_socket_to_host_stream(php_stream *stream, php_socket_t *current, const char *host, unsigned short port,
 		int socktype, int asynchronous, struct timeval *timeout, zend_string **error_string,
 		int *error_code, const char *bindto, unsigned short bindport, long sockopts, php_sockvals *sockvals
 		)
@@ -1071,7 +1111,7 @@ php_socket_t php_network_connect_socket_to_host_ex(php_stream *stream, php_socke
 		if (current) {
 			*current = sock;
 		}
-		n = php_network_connect_socket(stream, sock, sa, socklen, asynchronous,
+		n = php_network_connect_socket_stream(stream, sock, sa, socklen, asynchronous,
 				timeout ? &working_timeout : NULL,
 				error_string, error_code);
 
@@ -1126,8 +1166,17 @@ php_socket_t php_network_connect_socket_to_host(const char *host, unsigned short
 		int *error_code, const char *bindto, unsigned short bindport, long sockopts
 		)
 {
-	return php_network_connect_socket_to_host_ex(NULL, NULL, host, port, socktype, asynchronous, timeout,
+	return php_network_connect_socket_to_host_stream(NULL, NULL, host, port, socktype, asynchronous, timeout,
 			error_string, error_code, bindto, bindport, sockopts, NULL);
+}
+
+php_socket_t php_network_connect_socket_to_host_ex(const char *host, unsigned short port,
+		int socktype, int asynchronous, struct timeval *timeout, zend_string **error_string,
+		int *error_code, const char *bindto, unsigned short bindport, long sockopts, php_sockvals *sockvals
+		)
+{
+	return php_network_connect_socket_to_host_stream(NULL, NULL, host, port, socktype, asynchronous, timeout,
+			error_string, error_code, bindto, bindport, sockopts, sockvals);
 }
 
 /* {{{ php_any_addr

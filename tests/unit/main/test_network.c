@@ -49,7 +49,7 @@ static void test_php_network_connect_socket_immediate_success(void **state) {
 	expect_function_call(__wrap_connect);
 	will_return(__wrap_connect, 0);
 
-	int result = php_network_connect_socket(NULL, sockfd, NULL, 0, 0, &timeout, NULL, &error_code);
+	int result = php_network_connect_socket(sockfd, NULL, 0, 0, &timeout, NULL, &error_code);
 
 	assert_int_equal(result, 0);
 	assert_int_equal(error_code, 0);
@@ -75,7 +75,7 @@ static void test_php_network_connect_socket_progress_success(void **state) {
 	will_return(__wrap_getsockopt, 0); // optval saved result
 	will_return(__wrap_getsockopt, 0); // actual return value
 
-	int result = php_network_connect_socket(NULL, sockfd, NULL, 0, 0, &timeout_tv, NULL, &error_code);
+	int result = php_network_connect_socket(sockfd, NULL, 0, 0, &timeout_tv, NULL, &error_code);
 
 	assert_int_equal(result, 0);
 	assert_int_equal(error_code, 0);
@@ -106,7 +106,7 @@ static void test_php_network_connect_socket_eintr(void **state) {
 	will_return(__wrap_getsockopt, 0);
 	will_return(__wrap_getsockopt, 0);
 
-	int result = php_network_connect_socket(NULL, sockfd, NULL, 0, 0, &timeout_tv, NULL, &error_code);
+	int result = php_network_connect_socket(sockfd, NULL, 0, 0, &timeout_tv, NULL, &error_code);
 
 	// Ensure the function succeeds
 	assert_int_equal(result, 0);
@@ -133,7 +133,7 @@ static void test_php_network_connect_socket_usec_overflow(void **state) {
 	will_return(__wrap_getsockopt, 0);  // optval saved result
 	will_return(__wrap_getsockopt, 0);  // actual return value
 
-	int result = php_network_connect_socket(NULL, sockfd, NULL, 0, 0, &timeout_tv, NULL, &error_code);
+	int result = php_network_connect_socket(sockfd, NULL, 0, 0, &timeout_tv, NULL, &error_code);
 
 	// Ensure the function succeeds
 	assert_int_equal(result, 0);
@@ -160,7 +160,7 @@ static void test_php_network_connect_socket_progress_error(void **state) {
 	will_return(__wrap_getsockopt, ECONNREFUSED);  // optval saved result
 	will_return(__wrap_getsockopt, 0);  // actual return value
 
-	int result = php_network_connect_socket(NULL, sockfd, NULL, 0, 0, &timeout_tv, NULL, &error_code);
+	int result = php_network_connect_socket(sockfd, NULL, 0, 0, &timeout_tv, NULL, &error_code);
 
 	assert_int_equal(result, -1);
 	assert_int_equal(error_code, ECONNREFUSED);
@@ -176,7 +176,7 @@ static void test_php_network_connect_socket_connect_error(void **state) {
 	expect_function_call(__wrap_connect);
 	will_return(__wrap_connect, ECONNREFUSED);
 
-	int result = php_network_connect_socket(NULL, sockfd, NULL, 0, 0, &timeout, NULL, &error_code);
+	int result = php_network_connect_socket(sockfd, NULL, 0, 0, &timeout, NULL, &error_code);
 
 	// Ensure the function returns an error
 	assert_int_equal(result, -1);

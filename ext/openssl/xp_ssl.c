@@ -3514,7 +3514,7 @@ static inline int php_openssl_tcp_sockop_accept(php_stream *stream, php_openssl_
 		}
 	}
 
-	php_socket_t clisock = php_network_accept_incoming_ex(stream,
+	php_socket_t clisock = php_network_accept_incoming_stream_ex(stream,
 		sock->s.socket,
 		xparam->want_textaddr ? &xparam->outputs.textaddr : NULL,
 		xparam->want_addr ? &xparam->outputs.addr : NULL,

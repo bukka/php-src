@@ -861,7 +861,7 @@ static inline int php_tcp_sockop_connect(php_stream *stream, php_netstream_data_
 
 		parse_unix_address(stream, xparam, &unix_addr);
 
-		ret = php_network_connect_socket(stream, sock->socket,
+		ret = php_network_connect_socket_stream(stream, sock->socket,
 				(const struct sockaddr *)&unix_addr, (socklen_t) offsetof(struct sockaddr_un, sun_path) + xparam->inputs.namelen,
 				xparam->op == STREAM_XPORT_OP_CONNECT_ASYNC, xparam->inputs.timeout,
 				xparam->want_errortext ? &xparam->outputs.error_text : NULL,
@@ -967,7 +967,7 @@ static inline int php_tcp_sockop_connect(php_stream *stream, php_netstream_data_
 	 * want the default to be TCP sockets so that the openssl extension can
 	 * re-use this code. */
 
-	sock->socket = php_network_connect_socket_to_host_ex(stream, &sock->socket, host, portno,
+	sock->socket = php_network_connect_socket_to_host_stream(stream, &sock->socket, host, portno,
 			PHP_STREAM_XPORT_IS_UDP(stream) ? SOCK_DGRAM : SOCK_STREAM,
 			xparam->op == STREAM_XPORT_OP_CONNECT_ASYNC,
 			xparam->inputs.timeout,
@@ -1022,7 +1022,7 @@ static inline int php_tcp_sockop_accept(php_stream *stream, php_netstream_data_t
 		}
 	}
 
-	php_socket_t clisock = php_network_accept_incoming_ex(stream, sock->socket,
+	php_socket_t clisock = php_network_accept_incoming_stream_ex(stream, sock->socket,
 		xparam->want_textaddr ? &xparam->outputs.textaddr : NULL,
 		xparam->want_addr ? &xparam->outputs.addr : NULL,
 		xparam->want_addr ? &xparam->outputs.addrlen : NULL,
