@@ -22,7 +22,7 @@ var_dump(count($events), $events[0]->getTriggeredEvents());
 $status = $handle->getStatus();
 var_dump(pcntl_wifexited($status), pcntl_wexitstatus($status));
 
-// Level, like a pidfd: reported until the watcher is removed
+// Reported once, then no more
 var_dump(count($ctx->wait(Time\Duration::fromSeconds(0))));
 var_dump(proc_close($proc));
 $watcher->remove();
@@ -44,6 +44,6 @@ array(1) {
 }
 bool(true)
 int(3)
-int(1)
+int(0)
 int(3)
 Io\Poll\ProcessHandle::__construct(): Argument #1 ($pid) must be the id of a running process: %s

@@ -587,17 +587,16 @@ static zend_result php_io_poll_handle_backend_events(php_poll_handle_object *han
 	return SUCCESS;
 }
 
-/* The descriptor of a virtual handle fired */
+/* The descriptor of a virtual handle fired: its event only when the
+ * source had something to take */
 static uint32_t php_io_poll_handle_fired(php_poll_handle_object *handle, uint32_t revents)
 {
 	uint32_t virtual = handle->ops->event;
 	if (!virtual) {
 		return revents;
 	}
-	if ((revents & PHP_POLL_READ) && handle->ops->fired) {
-		handle->ops->fired(handle);
-	}
-	return (revents & (PHP_POLL_ERROR | PHP_POLL_HUP)) | ((revents & PHP_POLL_READ) ? virtual : 0);
+	bool took = (revents & PHP_POLL_READ) && (!handle->ops->fired || handle->ops->fired(handle));
+	return (revents & (PHP_POLL_ERROR | PHP_POLL_HUP)) | (took ? virtual : 0);
 }
 
 /* NotifyHandle: an eventfd, or a pipe where there is none. Level: readable
@@ -733,6 +732,7 @@ typedef struct {
 	pid_t pid;
 	int fd;
 	bool reaped;
+	bool exited;    /* reaped here or elsewhere: nothing more to report */
 	int status;
 } php_io_poll_process_handle_data;
 
@@ -759,24 +759,32 @@ static void php_io_poll_process_handle_cleanup(php_poll_handle_object *handle)
 	}
 }
 
-static void php_io_poll_process_handle_fired(php_poll_handle_object *handle)
+/* The exit is state: every context watching the handle reports it once */
+static bool php_io_poll_process_handle_fired(php_poll_handle_object *handle)
 {
 	php_io_poll_process_handle_data *data = handle->handle_data;
-	if (!data || data->reaped) {
-		return;
+	if (!data) {
+		return false;
 	}
 #ifndef PHP_WIN32
-	int status;
-	pid_t pid;
-	do {
-		pid = waitpid(data->pid, &status, WNOHANG);
-	} while (pid == -1 && errno == EINTR);
-	if (pid == data->pid) {
-		data->reaped = true;
-		data->status = status;
-		php_io_child_reaped(pid, status);
+	if (!data->exited) {
+		int status;
+		pid_t pid;
+		do {
+			pid = waitpid(data->pid, &status, WNOHANG);
+		} while (pid == -1 && errno == EINTR);
+		if (pid == data->pid) {
+			data->reaped = true;
+			data->exited = true;
+			data->status = status;
+			php_io_child_reaped(pid, status);
+		} else if (pid == -1 && errno == ECHILD) {
+			/* Not our child, or reaped by someone else: gone all the same */
+			data->exited = true;
+		}
 	}
 #endif
+	return data->exited;
 }
 
 static php_poll_handle_ops php_io_poll_process_handle_ops = {
@@ -786,6 +794,16 @@ static php_poll_handle_ops php_io_poll_process_handle_ops = {
 	.event    = PHP_POLL_PROCESS,
 	.fired    = php_io_poll_process_handle_fired,
 };
+
+/* A process handle whose process is gone: its descriptor stays readable */
+static bool php_io_poll_handle_exhausted(php_poll_handle_object *handle)
+{
+	if (handle->ops != &php_io_poll_process_handle_ops) {
+		return false;
+	}
+	php_io_poll_process_handle_data *data = handle->handle_data;
+	return data && data->exited;
+}
 
 static zend_object *php_io_poll_process_handle_create_object(zend_class_entry *ce)
 {
@@ -993,18 +1011,21 @@ static void php_io_poll_signal_handle_record(php_io_poll_signal_handle_data *dat
 	data->infos[data->n_infos++] = *info;
 }
 
-static void php_io_poll_signal_handle_fired(php_poll_handle_object *handle)
+static bool php_io_poll_signal_handle_fired(php_poll_handle_object *handle)
 {
 	php_io_poll_signal_handle_data *data = handle->handle_data;
+	bool took = false;
 	if (!data || data->fd < 0) {
-		return;
+		return false;
 	}
 #ifndef PHP_WIN32
 	siginfo_t info;
 	while (php_poll_signal_source_take(data->fd, &data->set, &info) > 0) {
 		php_io_poll_signal_handle_record(data, &info);
+		took = true;
 	}
 #endif
+	return took;
 }
 
 static php_poll_handle_ops php_io_poll_signal_handle_ops = {

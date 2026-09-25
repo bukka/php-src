@@ -256,9 +256,10 @@ struct php_poll_handle_ops {
 	/**
 	 * Called when the descriptor of such a handle was reported readable,
 	 * before the event is delivered, to consume the source and record what
-	 * it found. May be NULL.
+	 * it found. Returns whether it took something; the event is reported
+	 * only then. May be NULL.
 	 */
-	void (*fired)(php_poll_handle_object *handle);
+	bool (*fired)(php_poll_handle_object *handle);
 };
 
 /* Base poll handle object structure */
