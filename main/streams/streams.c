@@ -288,6 +288,11 @@ PHPAPI int php_stream_free(php_stream *stream, int close_options) /* {{{ */
 
 #endif
 
+	if (!(close_options & PHP_STREAM_FREE_RSRC_DTOR) && UNEXPECTED(php_io_stream_busy(stream))) {
+		zend_throw_error(NULL, "Concurrent access to a stream");
+		return EOF;
+	}
+
 	if (stream->in_free) {
 		/* hopefully called recursively from the enclosing stream; the pointer was NULLed below */
 		if ((stream->in_free == 1) && (close_options & PHP_STREAM_FREE_IGNORE_ENCLOSING) && (stream->enclosing_stream == NULL)) {
@@ -1769,6 +1774,13 @@ PHPAPI size_t _php_stream_copy_to_stream(php_stream *src, php_stream *dest, size
 static void stream_resource_regular_dtor(zend_resource *rsrc)
 {
 	php_stream *stream = (php_stream*)rsrc->ptr;
+	/* zend_list_close() while an op is suspended on the stream: the frame
+	 * holds a reference, and the resource stays open */
+	if (UNEXPECTED(php_io_stream_busy(stream)) && stream->res && GC_REFCOUNT(stream->res) > 0) {
+		stream->res->type = rsrc->type;
+		stream->res->ptr = stream;
+		return;
+	}
 	/* set the return value for pclose */
 	FG(pclose_ret) = php_stream_free(stream, PHP_STREAM_FREE_CLOSE | PHP_STREAM_FREE_RSRC_DTOR);
 }

@@ -253,6 +253,8 @@ PHPAPI void php_io_child_forget(pid_t pid);
 PHPAPI void php_io_stream_orphan(php_stream *stream, php_io_queue *queue);
 PHPAPI void php_io_stream_unfreeze(php_stream *stream);
 PHPAPI void php_io_stream_drain(php_stream *stream);
+/* Frozen by an op still running (not only by orphans): it cannot be freed */
+PHPAPI bool php_io_stream_busy(php_stream *stream);
 
 /* Deadline helpers; NULL or a negative tv_sec means no timeout, like poll(2) */
 

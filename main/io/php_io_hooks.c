@@ -604,6 +604,12 @@ PHPAPI void php_io_stream_unfreeze(php_stream *stream)
 	}
 }
 
+PHPAPI bool php_io_stream_busy(php_stream *stream)
+{
+	return (stream->flags & PHP_STREAM_FLAG_IN_USE)
+			&& !(FG(io_orphans) && zend_hash_index_exists(FG(io_orphans), php_io_stream_key(stream)));
+}
+
 /* Called from php_stream_free() with the stream still frozen */
 PHPAPI void php_io_stream_drain(php_stream *stream)
 {
@@ -982,6 +988,7 @@ static int php_io_poll_result_to_revents(const php_io_op_result *result, uint32_
  * frame (the ring on an abnormal exit) keeps it frozen until the op settled */
 typedef struct {
 	php_stream *stream;
+	zend_resource *res;
 	zend_object *handle;
 } php_io_frame;
 
@@ -990,6 +997,7 @@ typedef struct {
 static zend_result php_io_frame_begin(php_io_frame *f, php_stream *stream)
 {
 	f->stream = stream;
+	f->res = NULL;
 	f->handle = NULL;
 	if (stream) {
 		if (UNEXPECTED(stream->flags & PHP_STREAM_FLAG_IN_USE)) {
@@ -997,6 +1005,11 @@ static zend_result php_io_frame_begin(php_io_frame *f, php_stream *stream)
 			zend_throw_error(NULL, "Concurrent access to a stream");
 			php_io_set_errno(ECANCELED);
 			return FAILURE;
+		}
+		/* No resource release can free the stream under the op */
+		if (stream->res) {
+			f->res = stream->res;
+			GC_ADDREF(f->res);
 		}
 		if (FG(io_hooks)) {
 			zval handle_zv;
@@ -1015,6 +1028,11 @@ static void php_io_frame_end(php_io_frame *f, php_io_op *op)
 	}
 	if (f->handle) {
 		OBJ_RELEASE(f->handle);
+	}
+	/* A last reference dropped meanwhile leaves the stream to the request
+	 * shutdown: the stream layer above still uses it */
+	if (f->res) {
+		GC_DELREF(f->res);
 	}
 }
 
