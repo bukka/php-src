@@ -13,6 +13,7 @@
 */
 
 #include "php_poll_internal.h"
+#include "main/php_io_hooks.h"
 #ifndef PHP_WIN32
 # include <unistd.h>
 #endif
@@ -565,8 +566,9 @@ PHPAPI int php_poll_wait(php_poll_ctx *ctx, php_poll_event *events, int max_even
 	}
 
 	/* Delegate to backend - it handles everything including ET simulation if needed.
-	 * A wait interrupted by a signal restarts with the remaining time (an
-	 * io_uring in the same process interrupts waits for its task work). */
+	 * An interrupted wait restarts with the remaining time unless PHP has a
+	 * handler to run (an io_uring in the same process interrupts waits for
+	 * its task work). */
 	int nfds = 0;
 	if (n_due < max_events) {
 		zend_hrtime_t limit = ZEND_HRTIME_T_MAX;
@@ -578,7 +580,7 @@ PHPAPI int php_poll_wait(php_poll_ctx *ctx, php_poll_event *events, int max_even
 		}
 		for (;;) {
 			nfds = ctx->backend_ops->wait(ctx, events, max_events - n_due, timeout);
-			if (nfds >= 0 || ctx->last_error != PHP_POLL_ERR_INTERRUPTED) {
+			if (nfds >= 0 || ctx->last_error != PHP_POLL_ERR_INTERRUPTED || php_io_interrupt_pending()) {
 				break;
 			}
 			if (limit != ZEND_HRTIME_T_MAX) {

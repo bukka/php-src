@@ -1558,7 +1558,7 @@ PHPAPI int php_io_ring_wait(php_io_ring *ring, php_io_queue_completion *out, uin
 			ior_timespec ts = { .tv_sec = (int64_t) (remaining / ZEND_NANO_IN_SEC), .tv_nsec = (long long) (remaining % ZEND_NANO_IN_SEC) };
 			rc = ior_wait_cqe_timeout(ring->ctx, &cqe, &ts);
 		}
-		if (rc < 0 && rc != -ETIME && rc != -EINTR) {
+		if (rc < 0 && rc != -ETIME && (rc != -EINTR || php_io_interrupt_pending())) {
 			errno = -rc;
 			return -1;
 		}

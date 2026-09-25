@@ -30,6 +30,12 @@
 #endif
 
 PHPAPI void (*php_io_op_zobj_detach)(zend_object *zobj) = NULL;
+PHPAPI bool (*php_io_signal_pending)(void) = NULL;
+
+PHPAPI bool php_io_interrupt_pending(void)
+{
+	return zend_atomic_bool_load_ex(&EG(vm_interrupt)) || (php_io_signal_pending && php_io_signal_pending());
+}
 
 /* The callers of the socket entry points read php_socket_errno(), which on
  * Windows is the Winsock error rather than errno */
@@ -811,6 +817,10 @@ static zend_result php_io_run_sync(php_io_op *op, php_io_op_result *result)
 		int err = errno;
 		if (op->queue) {
 			q->ops->orphan(q, op);
+		}
+		if (err == EINTR) {
+			result->status = PHP_IO_INTERRUPTED;
+			return SUCCESS;
 		}
 		result->status = PHP_IO_DONE;
 		result->error = err ? err : EIO;

@@ -167,6 +167,14 @@ PHPAPI void php_io_hooks_unlock(void);
  * op that ended, so a provider keeping the object cannot reach the op. */
 PHPAPI extern void (*php_io_op_zobj_detach)(zend_object *zobj);
 
+/* Set by an extension that queues signals for PHP handlers (pcntl): true
+ * while one is waiting to be dispatched */
+PHPAPI extern bool (*php_io_signal_pending)(void);
+/* A wait woken by a signal gives up only when PHP has something to run for
+ * it; any other wakeup (io_uring task work, a signal PHP has no handler
+ * for) restarts it */
+PHPAPI bool php_io_interrupt_pending(void);
+
 /* The one call stream code makes. Wraps the hook with the UNSUPPORTED
  * fallback; without a provider it waits itself. */
 PHPAPI zend_result php_io_run(php_io_op *op, php_io_op_result *result);

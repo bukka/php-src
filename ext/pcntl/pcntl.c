@@ -191,6 +191,7 @@ static void pcntl_siginfo_to_zval(int, siginfo_t*, zval*);
 static void pcntl_signal_dispatch(void);
 static void pcntl_signal_dispatch_tick_function(int dummy_int, void *dummy_pointer);
 static void pcntl_interrupt_function(zend_execute_data *execute_data);
+static bool pcntl_signal_pending(void);
 
 static PHP_GINIT_FUNCTION(pcntl)
 {
@@ -224,6 +225,7 @@ PHP_MINIT_FUNCTION(pcntl)
 	register_pcntl_symbols(module_number);
 	orig_interrupt_function = zend_interrupt_function;
 	zend_interrupt_function = pcntl_interrupt_function;
+	php_io_signal_pending = pcntl_signal_pending;
 
 	return SUCCESS;
 }
@@ -1966,6 +1968,11 @@ PHP_FUNCTION(pcntl_setqos_class)
 	}
 }
 #endif
+
+static bool pcntl_signal_pending(void)
+{
+	return PCNTL_G(pending_signals);
+}
 
 static void pcntl_interrupt_function(zend_execute_data *execute_data)
 {

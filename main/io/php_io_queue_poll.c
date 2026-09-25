@@ -581,12 +581,8 @@ static int php_io_poll_queue_wait(php_io_queue *base, php_io_queue_completion *o
 
 		int n = php_poll_wait(q->ctx, q->events, (int) q->events_cap, pts);
 		if (n < 0) {
-			php_poll_error err = php_poll_get_error(q->ctx);
-			if (err == PHP_POLL_ERR_INTERRUPTED) {
-				/* Restart with the remaining time */
-				continue;
-			}
-			errno = php_io_poll_error_to_errno(err);
+			/* EINTR when a signal handler is pending: the context restarts on any other */
+			errno = php_io_poll_error_to_errno(php_poll_get_error(q->ctx));
 			return -1;
 		}
 

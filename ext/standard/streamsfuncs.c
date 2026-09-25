@@ -789,6 +789,9 @@ static int stream_select_any(zval *r_array, zval *w_array, zval *e_array, struct
 		if (php_io_run(&any, &any_result) == FAILURE) {
 			errno = ECANCELED;
 			ret = -1;
+		} else if (any_result.status == PHP_IO_INTERRUPTED) {
+			errno = EINTR;
+			ret = -1;
 		} else {
 			for (uint32_t i = 0; i < any.u.any.n_results; i++) {
 				uint32_t index = results[i].index;

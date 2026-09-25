@@ -2292,6 +2292,10 @@ PHP_METHOD(Io_Poll_Context, wait)
 	if (num_events < 0) {
 		php_poll_error err = php_poll_get_error(intern->ctx);
 		efree(events);
+		if (err == PHP_POLL_ERR_INTERRUPTED) {
+			/* A signal handler runs before the caller waits again */
+			RETURN_EMPTY_ARRAY();
+		}
 		php_io_poll_throw_failed_operation(
 				php_io_poll_failed_wait_class_entry, "Poll wait failed", err);
 		RETURN_THROWS();

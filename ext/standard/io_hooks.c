@@ -1052,6 +1052,10 @@ PHP_METHOD(Io_Poll_OperationQueue, waitCompletions)
 	if (n < 0) {
 		int err = errno;
 		efree(completions);
+		if (err == EINTR) {
+			/* A signal handler runs before the caller waits again */
+			RETURN_EMPTY_ARRAY();
+		}
 		if (err == EDEADLK) {
 			zend_throw_exception(php_io_exception_class_entry,
 					"No operation can complete: nothing pending has a descriptor or a deadline", err);
