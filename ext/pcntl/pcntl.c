@@ -1141,7 +1141,10 @@ PHP_FUNCTION(pcntl_sigtimedwait)
 
 	errno = 0;
 	siginfo_t siginfo;
-	php_deadline dl = php_io_deadline_from_ns((zend_hrtime_t) tv_sec * ZEND_NANO_IN_SEC + tv_nsec);
+	/* Too far to represent is as good as forever */
+	zend_hrtime_t ns = (zend_ulong) tv_sec >= ZEND_HRTIME_T_MAX / ZEND_NANO_IN_SEC
+			? ZEND_HRTIME_T_MAX : (zend_hrtime_t) tv_sec * ZEND_NANO_IN_SEC + tv_nsec;
+	php_deadline dl = php_io_deadline_from_ns(ns);
 	int signal_no = php_io_sigwait(NULL, &set, &siginfo, &dl);
 	if (signal_no == -1) {
 		if (errno != EAGAIN) {
@@ -1592,6 +1595,12 @@ PHP_FUNCTION(pcntl_rfork)
 	}
 #endif
 
+	if (php_io_ops_in_flight() > 0) {
+		/* An operation submitted to a queue would not be in flight in the child */
+		zend_throw_error(NULL, "Cannot fork while IO operations are in flight");
+		RETURN_THROWS();
+	}
+
 	pid = rfork(flags);
 	php_io_child_forget(pid);
 
@@ -1630,6 +1639,12 @@ PHP_FUNCTION(pcntl_forkx)
 
 	if (flags < FORK_NOSIGCHLD || flags > FORK_WAITPID) {
 		zend_argument_value_error(1, "must be FORK_NOSIGCHLD or FORK_WAITPID");
+		RETURN_THROWS();
+	}
+
+	if (php_io_ops_in_flight() > 0) {
+		/* An operation submitted to a queue would not be in flight in the child */
+		zend_throw_error(NULL, "Cannot fork while IO operations are in flight");
 		RETURN_THROWS();
 	}
 
