@@ -420,6 +420,7 @@ PHP_MINIT_FUNCTION(curl)
 		sizeof(zend_object_handlers));
 	php_curl_socket_handle_object_handlers.offset = offsetof(php_poll_handle_object, std);
 	php_curl_socket_handle_object_handlers.free_obj = php_poll_handle_object_free;
+	php_curl_socket_handle_object_handlers.clone_obj = NULL;
 	php_curl_socket_weak_handle_ce->default_object_handlers = &php_curl_socket_handle_object_handlers;
 
 	return SUCCESS;
@@ -2473,6 +2474,11 @@ static void php_curl_socket_entry_free(php_curl_socket_entry *e)
 
 /* CURLMOPT_SOCKETFUNCTION: bookkeeping only, never a provider call. On
  * CURL_POLL_REMOVE the handle is invalidated here, inside the callback,
+ZEND_METHOD(Io_Curl_SocketWeakHandle, __construct)
+{
+	zend_throw_error(NULL, "Cannot directly construct Io\\Curl\\SocketWeakHandle");
+}
+
  * because libcurl closes the socket right after. */
 static int php_curl_socket_callback(CURL *easy, curl_socket_t s, int what, void *userp, void *socketp)
 {

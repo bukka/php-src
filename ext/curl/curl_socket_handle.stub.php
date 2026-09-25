@@ -10,5 +10,8 @@ namespace Io\Curl {
      * @strict-properties
      * @not-serializable
      */
-    final class SocketWeakHandle implements WeakHandle {}
+    final class SocketWeakHandle implements WeakHandle
+    {
+        private function __construct() {}
+    }
 }
