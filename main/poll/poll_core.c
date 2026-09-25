@@ -422,9 +422,13 @@ static int php_poll_timer_report(php_poll_ctx *ctx, php_poll_event *events, int 
 		void *data = t->data;
 
 		if (t->period) {
-			do {
-				t->deadline += t->period;
-			} while (t->deadline <= now);
+			/* Skip the missed periods at once; one past the end never fires */
+			zend_hrtime_t periods = (now - t->deadline) / t->period + 1;
+			if (periods > (ZEND_HRTIME_T_MAX - t->deadline) / t->period) {
+				t->deadline = ZEND_HRTIME_T_MAX;
+			} else {
+				t->deadline += periods * t->period;
+			}
 			php_poll_timer_heap_down(ctx, 0);
 		} else {
 			php_poll_timer_disarm(ctx, t);
