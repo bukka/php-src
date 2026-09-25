@@ -1,5 +1,5 @@
 /* This is a generated file, edit io_ring.stub.php instead.
- * Stub hash: 47767d1c7168839a6d3890adf8859851b3583f3c
+ * Stub hash: 5a976bb52207481ab52ce4ae35c140a72adaacad
  * Has decl header: yes */
 
 #include "zend_enum.h"
@@ -41,25 +41,25 @@ ZEND_END_ARG_INFO()
 ZEND_METHOD(Io_Ring_Engine, __construct);
 ZEND_METHOD(Io_Ring_Engine, getBackend);
 ZEND_METHOD(Io_Ring_Engine, getHandle);
-ZEND_METHOD(Io_Poll_OperationQueue, submit);
-ZEND_METHOD(Io_Poll_OperationQueue, cancel);
-ZEND_METHOD(Io_Poll_OperationQueue, add);
-ZEND_METHOD(Io_Poll_OperationQueue, remove);
-ZEND_METHOD(Io_Poll_OperationQueue, waitCompletions);
-ZEND_METHOD(Io_Poll_OperationQueue, countPending);
-ZEND_METHOD(Io_Poll_OperationQueue, getHookCapabilities);
+ZEND_METHOD(Io_Ring_Engine, submit);
+ZEND_METHOD(Io_Ring_Engine, cancel);
+ZEND_METHOD(Io_Ring_Engine, add);
+ZEND_METHOD(Io_Ring_Engine, remove);
+ZEND_METHOD(Io_Ring_Engine, waitCompletions);
+ZEND_METHOD(Io_Ring_Engine, countPending);
+ZEND_METHOD(Io_Ring_Engine, getHookCapabilities);
 
 static const zend_function_entry class_Io_Ring_Engine_methods[] = {
 	ZEND_ME(Io_Ring_Engine, __construct, arginfo_class_Io_Ring_Engine___construct, ZEND_ACC_PUBLIC)
 	ZEND_ME(Io_Ring_Engine, getBackend, arginfo_class_Io_Ring_Engine_getBackend, ZEND_ACC_PUBLIC)
 	ZEND_ME(Io_Ring_Engine, getHandle, arginfo_class_Io_Ring_Engine_getHandle, ZEND_ACC_PUBLIC)
-	ZEND_RAW_FENTRY("submit", zim_Io_Poll_OperationQueue_submit, arginfo_class_Io_Ring_Engine_submit, ZEND_ACC_PUBLIC, NULL, NULL)
-	ZEND_RAW_FENTRY("cancel", zim_Io_Poll_OperationQueue_cancel, arginfo_class_Io_Ring_Engine_cancel, ZEND_ACC_PUBLIC, NULL, NULL)
-	ZEND_RAW_FENTRY("add", zim_Io_Poll_OperationQueue_add, arginfo_class_Io_Ring_Engine_add, ZEND_ACC_PUBLIC, NULL, NULL)
-	ZEND_RAW_FENTRY("remove", zim_Io_Poll_OperationQueue_remove, arginfo_class_Io_Ring_Engine_remove, ZEND_ACC_PUBLIC, NULL, NULL)
-	ZEND_RAW_FENTRY("waitCompletions", zim_Io_Poll_OperationQueue_waitCompletions, arginfo_class_Io_Ring_Engine_waitCompletions, ZEND_ACC_PUBLIC, NULL, NULL)
-	ZEND_RAW_FENTRY("countPending", zim_Io_Poll_OperationQueue_countPending, arginfo_class_Io_Ring_Engine_countPending, ZEND_ACC_PUBLIC, NULL, NULL)
-	ZEND_RAW_FENTRY("getHookCapabilities", zim_Io_Poll_OperationQueue_getHookCapabilities, arginfo_class_Io_Ring_Engine_getHookCapabilities, ZEND_ACC_PUBLIC, NULL, NULL)
+	ZEND_ME(Io_Ring_Engine, submit, arginfo_class_Io_Ring_Engine_submit, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Ring_Engine, cancel, arginfo_class_Io_Ring_Engine_cancel, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Ring_Engine, add, arginfo_class_Io_Ring_Engine_add, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Ring_Engine, remove, arginfo_class_Io_Ring_Engine_remove, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Ring_Engine, waitCompletions, arginfo_class_Io_Ring_Engine_waitCompletions, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Ring_Engine, countPending, arginfo_class_Io_Ring_Engine_countPending, ZEND_ACC_PUBLIC)
+	ZEND_ME(Io_Ring_Engine, getHookCapabilities, arginfo_class_Io_Ring_Engine_getHookCapabilities, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 

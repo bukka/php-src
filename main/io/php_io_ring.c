@@ -19,6 +19,7 @@
 #include <ior.h>
 #include <errno.h>
 #ifndef PHP_WIN32
+# include <dirent.h>
 # include <netdb.h>
 # include <unistd.h>
 # include <sys/wait.h>
@@ -88,6 +89,12 @@ struct php_io_ring {
 	uint32_t features;
 	bool fd_nonblock;
 	pid_t owner_pid;                /* a child inherits the ring but must not touch it */
+	int *fds;                       /* descriptors ior opened, closed in such a child */
+	uint32_t n_fds;
+	bool fds_closed;
+	bool work_started;              /* ior set up its worker pool */
+	php_io_ring *prev_ring;         /* the rings of this thread */
+	php_io_ring *next_ring;
 	uint32_t cap;                   /* completion queue size */
 	uint32_t in_ring;               /* entries taken whose cqe was not reaped yet */
 	uint32_t unsubmitted;           /* entries taken but not accepted by a submit yet */
@@ -147,11 +154,121 @@ static void php_io_ring_list_remove(php_io_ring_req **list, uint32_t *n, php_io_
 	ZEND_UNREACHABLE();
 }
 
-/* Inherited across fork: the kernel ring is shared with the parent and the
- * worker threads do not exist here, so it is left alone and leaked */
-static zend_always_inline bool php_io_ring_foreign(php_io_ring *ring)
+ZEND_TLS php_io_ring *php_io_rings = NULL;
+
+/* ior tells no descriptor but the notification one: the ones it opens are
+ * found by listing the table around the calls that may open them */
+typedef struct {
+	int *fds;
+	uint32_t n;
+} php_io_ring_fdset;
+
+static int php_io_ring_fd_cmp(const void *a, const void *b)
 {
-	return ring->owner_pid != getpid();
+	int x = *(const int *) a, y = *(const int *) b;
+	return (x > y) - (x < y);
+}
+
+static void php_io_ring_fds_list(php_io_ring_fdset *set)
+{
+	set->fds = NULL;
+	set->n = 0;
+#ifndef PHP_WIN32
+	DIR *dir = opendir("/proc/self/fd");
+	if (!dir) {
+		dir = opendir("/dev/fd");
+	}
+	if (!dir) {
+		return;
+	}
+	uint32_t cap = 0;
+	struct dirent *de;
+	while ((de = readdir(dir)) != NULL) {
+		if (de->d_name[0] < '0' || de->d_name[0] > '9') {
+			continue;
+		}
+		int fd = atoi(de->d_name);
+		if (fd == dirfd(dir)) {
+			continue;
+		}
+		if (set->n == cap) {
+			cap = cap ? cap * 2 : 64;
+			set->fds = safe_erealloc(set->fds, cap, sizeof(int), 0);
+		}
+		set->fds[set->n++] = fd;
+	}
+	closedir(dir);
+	qsort(set->fds, set->n, sizeof(int), php_io_ring_fd_cmp);
+#endif
+}
+
+/* What ior opens: an io_uring, eventfd or epoll instance, or a pipe */
+static bool php_io_ring_fd_is_ior(int fd)
+{
+#ifdef __linux__
+	char path[32], target[32];
+	snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+	ssize_t n = readlink(path, target, sizeof(target) - 1);
+	if (n < 0) {
+		return false;
+	}
+	target[n] = '\0';
+	return strncmp(target, "anon_inode:", sizeof("anon_inode:") - 1) == 0
+			|| strncmp(target, "pipe:", sizeof("pipe:") - 1) == 0;
+#else
+	return true;
+#endif
+}
+
+static void php_io_ring_fds_adopt(php_io_ring *ring, php_io_ring_fdset *before)
+{
+	php_io_ring_fdset after;
+	php_io_ring_fds_list(&after);
+	for (uint32_t i = 0; i < after.n; i++) {
+		int fd = after.fds[i];
+		if (bsearch(&fd, before->fds, before->n, sizeof(int), php_io_ring_fd_cmp) || !php_io_ring_fd_is_ior(fd)) {
+			continue;
+		}
+		ring->fds = safe_erealloc(ring->fds, ring->n_fds + 1, sizeof(int), 0);
+		ring->fds[ring->n_fds++] = fd;
+	}
+	if (after.fds) {
+		efree(after.fds);
+	}
+	if (before->fds) {
+		efree(before->fds);
+	}
+}
+
+/* Inherited across fork: the kernel ring is shared with the parent and the
+ * worker threads do not exist here, so the context is leaked untouched and
+ * only the descriptors are closed */
+static bool php_io_ring_foreign(php_io_ring *ring)
+{
+	if (EXPECTED(ring->owner_pid == getpid())) {
+		return false;
+	}
+#ifndef PHP_WIN32
+	if (!ring->fds_closed) {
+		ring->fds_closed = true;
+		for (uint32_t i = 0; i < ring->n_fds; i++) {
+			close(ring->fds[i]);
+		}
+	}
+#endif
+	return true;
+}
+
+PHPAPI bool php_io_ring_inherited(php_io_ring *ring)
+{
+	return php_io_ring_foreign(ring);
+}
+
+PHPAPI void php_io_ring_after_fork(void)
+{
+	for (php_io_ring *ring = php_io_rings; ring; ring = ring->next_ring) {
+		php_io_ring_foreign(ring);
+	}
 }
 
 PHPAPI php_io_ring *php_io_ring_create(uint32_t entries, bool fd_nonblock)
@@ -173,13 +290,24 @@ PHPAPI php_io_ring *php_io_ring_create(uint32_t entries, bool fd_nonblock)
 	params.cq_entries = cq;
 
 	ior_ctx *ctx;
+	php_io_ring_fdset before;
+	php_io_ring_fds_list(&before);
 	int rc = ior_queue_init_params(sq, &ctx, &params);
 	if (rc < 0) {
+		if (before.fds) {
+			efree(before.fds);
+		}
 		errno = -rc;
 		return NULL;
 	}
 
 	php_io_ring *ring = ecalloc(1, sizeof(*ring));
+	php_io_ring_fds_adopt(ring, &before);
+	ring->next_ring = php_io_rings;
+	if (php_io_rings) {
+		php_io_rings->prev_ring = ring;
+	}
+	php_io_rings = ring;
 	ring->ctx = ctx;
 	ring->features = params.features;
 	ring->owner_pid = getpid();
@@ -221,7 +349,19 @@ PHPAPI uint32_t php_io_ring_hook_flags(php_io_ring *ring)
 
 PHPAPI php_socket_t php_io_ring_notify_fd(php_io_ring *ring)
 {
+	if (php_io_ring_foreign(ring)) {
+		errno = EPERM;
+		return SOCK_ERR;
+	}
+	php_io_ring_fdset before;
+	bool first = !ring->notify_created;
+	if (first) {
+		php_io_ring_fds_list(&before);
+	}
 	ior_fd_t fd = ior_notify_fd(ring->ctx);
+	if (first) {
+		php_io_ring_fds_adopt(ring, &before);
+	}
 	if (fd == IOR_INVALID_FD) {
 		return SOCK_ERR;
 	}
@@ -231,13 +371,16 @@ PHPAPI php_socket_t php_io_ring_notify_fd(php_io_ring *ring)
 
 PHPAPI void php_io_ring_notify_clear(php_io_ring *ring)
 {
-	if (ring->notify_created) {
+	if (ring->notify_created && !php_io_ring_foreign(ring)) {
 		ior_notify_clear(ring->ctx);
 	}
 }
 
 PHPAPI uint32_t php_io_ring_count_pending(php_io_ring *ring)
 {
+	if (php_io_ring_foreign(ring)) {
+		return 0;
+	}
 	/* Orphans included: a loop must keep reaping until they settled */
 	uint32_t n = ring->pending;
 	for (php_io_ring_req *r = ring->live; r; r = r->next) {
@@ -526,6 +669,20 @@ static zend_always_inline void *php_io_ring_io_buf(php_io_ring_req *req, php_io_
 
 /* Work callbacks: they run on a worker and see only the record */
 
+/* The first work op starts ior's worker pool, which may open descriptors */
+static int php_io_ring_prep_work(php_io_ring *ring, ior_sqe *sqe, ior_work_fn fn, php_io_ring_req *req)
+{
+	if (ring->work_started) {
+		return ior_prep_work(ring->ctx, sqe, fn, req);
+	}
+	php_io_ring_fdset before;
+	php_io_ring_fds_list(&before);
+	int rc = ior_prep_work(ring->ctx, sqe, fn, req);
+	php_io_ring_fds_adopt(ring, &before);
+	ring->work_started = rc >= 0;
+	return rc;
+}
+
 static int32_t php_io_ring_work_getaddrinfo(ior_work_token *token, void *arg)
 {
 	php_io_ring_req *req = arg;
@@ -726,13 +883,13 @@ static zend_result php_io_ring_submit_one(php_io_ring *ring, php_io_ring_req *re
 			uses_caller = true;
 			break;
 		case PHP_IO_OP_GETADDRINFO:
-			err = ior_prep_work(ctx, sqe, php_io_ring_work_getaddrinfo, req) < 0 ? ENOTSUP : 0;
+			err = php_io_ring_prep_work(ring, sqe, php_io_ring_work_getaddrinfo, req) < 0 ? ENOTSUP : 0;
 			break;
 		case PHP_IO_OP_GETNAMEINFO:
-			err = ior_prep_work(ctx, sqe, php_io_ring_work_getnameinfo, req) < 0 ? ENOTSUP : 0;
+			err = php_io_ring_prep_work(ring, sqe, php_io_ring_work_getnameinfo, req) < 0 ? ENOTSUP : 0;
 			break;
 		case PHP_IO_OP_FSYNC:
-			err = ior_prep_work(ctx, sqe, php_io_ring_work_fsync, req) < 0 ? ENOTSUP : 0;
+			err = php_io_ring_prep_work(ring, sqe, php_io_ring_work_fsync, req) < 0 ? ENOTSUP : 0;
 			uses_caller = true;
 			break;
 		case PHP_IO_OP_WAITPID:
@@ -1468,6 +1625,17 @@ PHPAPI void php_io_ring_destroy(php_io_ring *ring)
 	}
 	if (ring->ctx && !foreign) {
 		ior_queue_exit(ring->ctx);
+	}
+	if (ring->prev_ring) {
+		ring->prev_ring->next_ring = ring->next_ring;
+	} else {
+		php_io_rings = ring->next_ring;
+	}
+	if (ring->next_ring) {
+		ring->next_ring->prev_ring = ring->prev_ring;
+	}
+	if (ring->fds) {
+		efree(ring->fds);
 	}
 	if (ring->ready) {
 		efree(ring->ready);

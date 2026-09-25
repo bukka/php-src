@@ -12,6 +12,7 @@
 
 #include "php.h"
 #include "main/php_io_hooks.h"
+#include "main/php_io_ring.h"
 #include "ext/standard/file.h"
 #include "ext/standard/io_poll.h"
 
@@ -516,6 +517,11 @@ PHPAPI bool php_io_child_take_reaped(pid_t *pid, int *status)
 
 PHPAPI void php_io_child_forget(pid_t pid)
 {
+#ifdef HAVE_IOR
+	if (pid == 0) {
+		php_io_ring_after_fork();
+	}
+#endif
 	if (!FG(io_reaped)) {
 		return;
 	}

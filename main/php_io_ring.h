@@ -62,6 +62,12 @@ PHPAPI const char *php_io_ring_backend_name(php_io_ring *ring);
 /* PHP_IO_HOOKS_F_* a provider on this ring should register with */
 PHPAPI uint32_t php_io_ring_hook_flags(php_io_ring *ring);
 
+/* A ring created by another process, inherited across fork: unusable, its
+ * descriptors are closed on the first call and every operation fails */
+PHPAPI bool php_io_ring_inherited(php_io_ring *ring);
+/* In a forked child: closes the descriptors of every ring of this thread */
+PHPAPI void php_io_ring_after_fork(void);
+
 /* The ring as an operation queue (section 5.6) */
 PHPAPI php_io_queue *php_io_queue_create_ring(uint32_t entries);
 /* The ring behind a queue created by php_io_queue_create_ring() */

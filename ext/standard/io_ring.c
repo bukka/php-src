@@ -39,6 +39,42 @@ static php_io_ring *php_io_ring_engine_ring(php_io_opqueue_obj *intern)
 	return php_io_queue_ring(intern->queue);
 }
 
+ZEND_METHOD(Io_Poll_OperationQueue, submit);
+ZEND_METHOD(Io_Poll_OperationQueue, cancel);
+ZEND_METHOD(Io_Poll_OperationQueue, add);
+ZEND_METHOD(Io_Poll_OperationQueue, remove);
+ZEND_METHOD(Io_Poll_OperationQueue, waitCompletions);
+ZEND_METHOD(Io_Poll_OperationQueue, countPending);
+ZEND_METHOD(Io_Poll_OperationQueue, getHookCapabilities);
+
+/* A forked child cannot use the ring it inherited */
+static zend_result php_io_ring_engine_check(zval *zv)
+{
+	php_io_opqueue_obj *intern = PHP_IO_OPQUEUE_FROM_ZOBJ(Z_OBJ_P(zv));
+	if (intern->queue && php_io_ring_inherited(php_io_ring_engine_ring(intern))) {
+		zend_throw_exception(php_io_ring_exception_ce, "The ring was created in another process", 0);
+		return FAILURE;
+	}
+	return SUCCESS;
+}
+
+#define PHP_IO_RING_ENGINE_QUEUE_METHOD(name) \
+	PHP_METHOD(Io_Ring_Engine, name) \
+	{ \
+		if (php_io_ring_engine_check(ZEND_THIS) == FAILURE) { \
+			RETURN_THROWS(); \
+		} \
+		ZEND_MN(Io_Poll_OperationQueue_##name)(INTERNAL_FUNCTION_PARAM_PASSTHRU); \
+	}
+
+PHP_IO_RING_ENGINE_QUEUE_METHOD(submit)
+PHP_IO_RING_ENGINE_QUEUE_METHOD(cancel)
+PHP_IO_RING_ENGINE_QUEUE_METHOD(add)
+PHP_IO_RING_ENGINE_QUEUE_METHOD(remove)
+PHP_IO_RING_ENGINE_QUEUE_METHOD(waitCompletions)
+PHP_IO_RING_ENGINE_QUEUE_METHOD(countPending)
+PHP_IO_RING_ENGINE_QUEUE_METHOD(getHookCapabilities)
+
 PHP_METHOD(Io_Ring_Engine, __construct)
 {
 	zend_long entries = 0;
@@ -76,6 +112,9 @@ PHP_METHOD(Io_Ring_Engine, getBackend)
 		zend_throw_error(NULL, "Io\\Ring\\Engine object is not constructed");
 		RETURN_THROWS();
 	}
+	if (php_io_ring_engine_check(ZEND_THIS) == FAILURE) {
+		RETURN_THROWS();
+	}
 
 	zend_long id;
 	switch (php_io_ring_get_backend_type(php_io_ring_engine_ring(intern))) {
@@ -98,6 +137,9 @@ PHP_METHOD(Io_Ring_Engine, getHandle)
 	php_io_opqueue_obj *intern = PHP_IO_OPQUEUE_FROM_ZOBJ(Z_OBJ_P(ZEND_THIS));
 	if (!intern->queue) {
 		zend_throw_error(NULL, "Io\\Ring\\Engine object is not constructed");
+		RETURN_THROWS();
+	}
+	if (php_io_ring_engine_check(ZEND_THIS) == FAILURE) {
 		RETURN_THROWS();
 	}
 

@@ -35,30 +35,23 @@ namespace Io\Ring {
          */
         public function getHandle(): \Io\Poll\NotifyHandle {}
 
-        /** @implementation-alias Io\Poll\OperationQueue::submit */
         public function submit(\Io\Operation $op, mixed $data = null): void {}
 
-        /** @implementation-alias Io\Poll\OperationQueue::cancel */
         public function cancel(\Io\Operation $op): void {}
 
-        /** @implementation-alias Io\Poll\OperationQueue::add */
         public function add(\Io\Operation $op): void {}
 
-        /** @implementation-alias Io\Poll\OperationQueue::remove */
         public function remove(\Io\Operation $op): void {}
 
         /**
          * @return list<\Io\Completion>
-         * @implementation-alias Io\Poll\OperationQueue::waitCompletions
          */
         public function waitCompletions(?\Time\Duration $timeout = null, ?int $max = null): array {}
 
-        /** @implementation-alias Io\Poll\OperationQueue::countPending */
         public function countPending(): int {}
 
         /**
          * @return list<\Io\Hooks\Capability>
-         * @implementation-alias Io\Poll\OperationQueue::getHookCapabilities
          */
         public function getHookCapabilities(): array {}
     }
