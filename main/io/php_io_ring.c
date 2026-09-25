@@ -1062,25 +1062,80 @@ static void php_io_ring_req_lt_cqe(php_io_ring *ring, php_io_ring_req *req)
 	}
 }
 
+/* Poll members that are ready by now but whose cqe is not there yet (the
+ * thread backend posts each from its poller in turn) are reported too */
+static void php_io_ring_group_probe(php_io_ring_req *req, bool *probed)
+{
+	php_pollfd stack[16];
+	php_pollfd *fds = stack;
+	uint32_t n = 0;
+
+	for (uint32_t i = 0; i < req->n_members; i++) {
+		php_io_ring_req *m = req->members[i];
+		if (!m->main_done && m->type == PHP_IO_OP_POLL) {
+			n++;
+		}
+	}
+	if (n == 0) {
+		return;
+	}
+	if (n > sizeof(stack) / sizeof(stack[0])) {
+		fds = safe_emalloc(n, sizeof(*fds), 0);
+	}
+	n = 0;
+	for (uint32_t i = 0; i < req->n_members; i++) {
+		php_io_ring_req *m = req->members[i];
+		if (!m->main_done && m->type == PHP_IO_OP_POLL) {
+			fds[n].fd = m->op->fd;
+			fds[n].events = (m->op->u.poll.events & PHP_POLL_READ ? POLLIN : 0)
+					| (m->op->u.poll.events & PHP_POLL_WRITE ? POLLOUT : 0);
+			fds[n].revents = 0;
+			n++;
+		}
+	}
+	if (php_poll2(fds, n, 0) > 0) {
+		n = 0;
+		for (uint32_t i = 0; i < req->n_members; i++) {
+			php_io_ring_req *m = req->members[i];
+			if (!m->main_done && m->type == PHP_IO_OP_POLL) {
+				short revents = fds[n++].revents;
+				if (revents) {
+					uint32_t mask = (revents & POLLIN ? IOR_POLL_IN : 0) | (revents & POLLOUT ? IOR_POLL_OUT : 0)
+							| (revents & POLLERR ? IOR_POLL_ERR : 0) | (revents & POLLHUP ? IOR_POLL_HUP : 0)
+							| (revents & POLLNVAL ? IOR_POLL_NVAL : 0);
+					php_io_ring_result_from_cqe(m, (int32_t) mask);
+					probed[i] = true;
+				}
+			}
+		}
+	}
+	if (fds != stack) {
+		efree(fds);
+	}
+}
+
 /* The Any completes with the members that completed by now; the rest are
  * cancelled and their cqes consumed silently */
 static void php_io_ring_group_fold(php_io_ring *ring, php_io_ring_req *req)
 {
 	php_io_op *op = req->op;
 	uint32_t n_results = 0;
+	bool *probed = ecalloc(MAX(req->n_members, 1), sizeof(bool));
 
 	req->fired = false;
 	req->group_done = true;
+	php_io_ring_group_probe(req, probed);
 
 	for (uint32_t i = 0; i < req->n_members; i++) {
 		php_io_ring_req *m = req->members[i];
-		if (m->main_done) {
+		if (m->main_done || probed[i]) {
 			if (op->u.any.results) {
 				op->u.any.results[n_results] = m->result;
 			}
 			php_io_ring_req_output(m, m->op);
 			n_results++;
-		} else {
+		}
+		if (!m->main_done) {
 			php_io_ring_req_cancel(ring, m);
 		}
 		m->group = NULL;
@@ -1088,6 +1143,7 @@ static void php_io_ring_group_fold(php_io_ring *ring, php_io_ring_req *req)
 	}
 	req->n_members = 0;
 	op->u.any.n_results = n_results;
+	efree(probed);
 
 	req->ready = true;
 	req->result.status = PHP_IO_DONE;
@@ -1130,8 +1186,10 @@ static void php_io_ring_process_cqe(php_io_ring *ring, uintptr_t data, int32_t r
 	}
 }
 
-/* Take everything the ring has. The batch is consumed before it is
- * processed, so a cancel submitted meanwhile finds the room it needs. */
+/* Take everything the ring has, until a peek finds nothing: the members
+ * of an Any that are ready by now are all reported with it. The batch is
+ * consumed before it is processed, so a cancel submitted meanwhile finds
+ * the room it needs. */
 static uint32_t php_io_ring_reap(php_io_ring *ring)
 {
 	uint32_t total = 0;
@@ -1149,9 +1207,6 @@ static uint32_t php_io_ring_reap(php_io_ring *ring)
 			php_io_ring_process_cqe(ring, ring->batch[i].data, ring->batch[i].res);
 		}
 		total += n;
-		if (n < ring->cqes_cap) {
-			break;
-		}
 	}
 	php_io_ring_fold_all(ring);
 	return total;
