@@ -770,6 +770,8 @@ static bool php_io_poll_process_handle_fired(php_poll_handle_object *handle)
 	if (!data->exited) {
 		int status;
 		pid_t pid;
+		/* A zombie still has its group, for a later wait on the group */
+		pid_t pgid = getpgid(data->pid);
 		do {
 			pid = waitpid(data->pid, &status, WNOHANG);
 		} while (pid == -1 && errno == EINTR);
@@ -777,7 +779,7 @@ static bool php_io_poll_process_handle_fired(php_poll_handle_object *handle)
 			data->reaped = true;
 			data->exited = true;
 			data->status = status;
-			php_io_child_reaped(pid, status);
+			php_io_child_reaped_ex(pid, pgid > 0 ? pgid : 0, status);
 		} else if (pid == -1 && errno == ECHILD) {
 			/* Not our child, or reaped by someone else: gone all the same */
 			data->exited = true;

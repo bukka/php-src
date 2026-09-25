@@ -451,42 +451,79 @@ PHPAPI void php_io_freeaddrinfo(struct addrinfo *res)
 	freeaddrinfo(res);
 }
 
-PHPAPI void php_io_child_reaped(pid_t pid, int status)
+typedef struct {
+	int status;
+	pid_t pgid;
+} php_io_reaped_child;
+
+static void php_io_reaped_child_dtor(zval *zv)
+{
+	efree(Z_PTR_P(zv));
+}
+
+PHPAPI void php_io_child_reaped_ex(pid_t pid, pid_t pgid, int status)
 {
 	if (!FG(io_reaped)) {
 		FG(io_reaped) = emalloc(sizeof(HashTable));
-		zend_hash_init(FG(io_reaped), 4, NULL, NULL, 0);
+		zend_hash_init(FG(io_reaped), 4, NULL, php_io_reaped_child_dtor, 0);
 	}
-	zval zv;
-	ZVAL_LONG(&zv, status);
-	zend_hash_index_update(FG(io_reaped), (zend_ulong) pid, &zv);
+	php_io_reaped_child *child = emalloc(sizeof(*child));
+	child->status = status;
+	child->pgid = pgid;
+	zend_hash_index_update_ptr(FG(io_reaped), (zend_ulong) pid, child);
 }
 
-/* pid -1 takes any recorded child, as waitpid(-1) would */
+PHPAPI void php_io_child_reaped(pid_t pid, int status)
+{
+	php_io_child_reaped_ex(pid, 0, status);
+}
+
+/* pid selects as waitpid() does: itself, -1 any child, 0 the caller's
+ * process group, < -1 the group -pid. A child whose group is unknown is
+ * only taken by pid or by -1. */
 PHPAPI bool php_io_child_take_reaped(pid_t *pid, int *status)
 {
 	if (!FG(io_reaped) || zend_hash_num_elements(FG(io_reaped)) == 0) {
 		return false;
 	}
-	zval *zv = NULL;
+	php_io_reaped_child *child = NULL;
 	zend_ulong key = 0;
 	if (*pid > 0) {
 		key = (zend_ulong) *pid;
-		zv = zend_hash_index_find(FG(io_reaped), key);
-	} else if (*pid == -1) {
-		zval *first;
-		ZEND_HASH_FOREACH_NUM_KEY_VAL(FG(io_reaped), key, first) {
-			zv = first;
-			break;
+		child = zend_hash_index_find_ptr(FG(io_reaped), key);
+	} else {
+#ifndef PHP_WIN32
+		pid_t pgid = *pid == 0 ? getpgrp() : -*pid;
+#else
+		pid_t pgid = -*pid;
+#endif
+		php_io_reaped_child *c;
+		ZEND_HASH_FOREACH_NUM_KEY_PTR(FG(io_reaped), key, c) {
+			if (*pid == -1 || (c->pgid > 0 && c->pgid == pgid)) {
+				child = c;
+				break;
+			}
 		} ZEND_HASH_FOREACH_END();
 	}
-	if (!zv) {
+	if (!child) {
 		return false;
 	}
 	*pid = (pid_t) key;
-	*status = (int) Z_LVAL_P(zv);
+	*status = child->status;
 	zend_hash_index_del(FG(io_reaped), key);
 	return true;
+}
+
+PHPAPI void php_io_child_forget(pid_t pid)
+{
+	if (!FG(io_reaped)) {
+		return;
+	}
+	if (pid == 0) {
+		zend_hash_clean(FG(io_reaped));
+	} else if (pid > 0) {
+		zend_hash_index_del(FG(io_reaped), (zend_ulong) pid);
+	}
 }
 
 PHPAPI uint32_t php_io_ops_in_flight(void)

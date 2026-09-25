@@ -222,9 +222,15 @@ PHPAPI int php_io_sigwait(zend_object *handle, const php_sigset_t *set, php_sigi
 PHPAPI uint32_t php_io_ops_in_flight(void);
 
 /* A child reaped through a handle: its status is handed to the next wait
- * for it, so proc_close() and pcntl_waitpid() do not fail with ECHILD */
+ * for it, so proc_close() and pcntl_waitpid() do not fail with ECHILD.
+ * pgid is its process group when known, 0 otherwise. */
 PHPAPI void php_io_child_reaped(pid_t pid, int status);
-PHPAPI bool php_io_child_take_reaped(pid_t *pid, int *status);   /* -1 takes any, the pid comes back */
+PHPAPI void php_io_child_reaped_ex(pid_t pid, pid_t pgid, int status);
+/* pid as for waitpid(2): -1 any, 0 or < -1 a process group; the pid comes back */
+PHPAPI bool php_io_child_take_reaped(pid_t *pid, int *status);
+/* A process was created, pid as fork() returned it: in the new child (0)
+ * nothing recorded is its own, in the parent the pid is a new child */
+PHPAPI void php_io_child_forget(pid_t pid);
 
 /* Orphans: a queue that keeps an in-flight op after its frame went away
  * registers the stream here and unfreezes it when the op settled. A stream
