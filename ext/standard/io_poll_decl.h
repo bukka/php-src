@@ -1,8 +1,8 @@
 /* This is a generated file, edit io_poll.stub.php instead.
- * Stub hash: 1c11910d6fc2fee91fa3961c7dd927819be0da45 */
+ * Stub hash: 140359436db0272de2443af78b4a64c80a338535 */
 
-#ifndef ZEND_IO_POLL_DECL_1c11910d6fc2fee91fa3961c7dd927819be0da45_H
-#define ZEND_IO_POLL_DECL_1c11910d6fc2fee91fa3961c7dd927819be0da45_H
+#ifndef ZEND_IO_POLL_DECL_140359436db0272de2443af78b4a64c80a338535_H
+#define ZEND_IO_POLL_DECL_140359436db0272de2443af78b4a64c80a338535_H
 
 typedef enum zend_enum_Io_Poll_Backend {
 	ZEND_ENUM_Io_Poll_Backend_Auto = 1,
@@ -28,4 +28,4 @@ typedef enum zend_enum_Io_Poll_Event {
 	ZEND_ENUM_Io_Poll_Event_Process = 12,
 } zend_enum_Io_Poll_Event;
 
-#endif /* ZEND_IO_POLL_DECL_1c11910d6fc2fee91fa3961c7dd927819be0da45_H */
+#endif /* ZEND_IO_POLL_DECL_140359436db0272de2443af78b4a64c80a338535_H */

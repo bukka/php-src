@@ -1,5 +1,5 @@
 /* This is a generated file, edit io_poll.stub.php instead.
- * Stub hash: 1c11910d6fc2fee91fa3961c7dd927819be0da45
+ * Stub hash: 140359436db0272de2443af78b4a64c80a338535
  * Has decl header: yes */
 
 #include "zend_enum.h"

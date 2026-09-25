@@ -107,9 +107,11 @@ namespace Io\Poll {
     }
 
     /**
-     * A child process by pid. When the context reports Event::Process the
-     * child was reaped through the handle and getStatus() has its wait
-     * status; a later proc_close() or pcntl_waitpid() on it reads that.
+     * A process by pid. Each context reports Event::Process once when the
+     * process exited. A child is reaped through the handle and getStatus()
+     * has its wait status; a later proc_close() or pcntl_waitpid() on it
+     * reads that. The status stays null for a process that is not our child
+     * or was reaped elsewhere.
      * @strict-properties
      * @not-serializable
      */
@@ -187,6 +189,11 @@ namespace Io\Poll {
 
         public function getBackend(): Backend {}
 
+        /**
+         * Called with each watcher the context lost without Watcher::remove(),
+         * because its stream was closed or its handle invalidated. The calls
+         * are made by the next wait(), before it polls.
+         */
         public function onWatcherRemoved(?callable $callback = null): void {}
     }
 
