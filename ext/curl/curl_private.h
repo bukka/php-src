@@ -26,6 +26,8 @@
 #include <curl/curl.h>
 #include <curl/multi.h>
 
+#include "main/php_deadline.h"
+
 #define CURLOPT_RETURNTRANSFER 19913
 #define CURLOPT_BINARYTRANSFER 19914 /* For Backward compatibility */
 #define PHP_CURL_STDOUT 0
@@ -118,8 +120,9 @@ typedef struct {
 	/* The sockets libcurl wants watched, kept by the socket callback */
 	HashTable *io_sockets;        /* curl_socket_t -> php_curl_socket_entry */
 	struct _php_curl_socket_entry *io_removed; /* entries libcurl removed, released by the reconcile step */
-	long io_timer_ms;        /* timer value from TIMERFUNCTION, -1 = disabled */
+	php_deadline io_timer;   /* deadline from TIMERFUNCTION, infinite = disabled */
 	CURLM *multi;            /* private multi handle driving curl_exec(), created on first use */
+	long maxconnects;        /* CURLOPT_MAXCONNECTS, copied to the private multi */
 	zend_object                   std;
 } php_curl;
 

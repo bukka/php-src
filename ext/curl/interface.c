@@ -1177,7 +1177,7 @@ void init_curl_handle(php_curl *ch)
 	ZVAL_UNDEF(&ch->postfields);
 	ch->io_sockets = NULL;
 	ch->io_removed = NULL;
-	ch->io_timer_ms = -1;
+	php_deadline_init_infinite(&ch->io_timer);
 	ch->multi = NULL;
 }
 
@@ -1230,6 +1230,8 @@ static void _php_curl_set_default_options(php_curl *ch)
 	curl_easy_setopt(ch->cp, CURLOPT_WRITEHEADER,       (void *) ch);
 	curl_easy_setopt(ch->cp, CURLOPT_DNS_CACHE_TIMEOUT, 120L);
 	curl_easy_setopt(ch->cp, CURLOPT_MAXREDIRS, 20L); /* prevent infinite redirects */
+	/* libcurl's DEFAULT_CONNCACHE_SIZE */
+	ch->maxconnects = 5;
 
 	const char *cainfo = zend_ini_string_literal("openssl.cafile");
 	if (!(cainfo && cainfo[0] != '\0')) {
@@ -1292,6 +1294,8 @@ static void php_curl_copy_fcc_with_option(php_curl *ch, CURLoption option, zend_
 
 void _php_setup_easy_copy_handlers(php_curl *ch, php_curl *source)
 {
+	ch->maxconnects = source->maxconnects;
+
 	if (!Z_ISUNDEF(source->handlers.write->stream)) {
 		Z_ADDREF(source->handlers.write->stream);
 	}
@@ -1883,6 +1887,9 @@ static zend_result _php_curl_setopt(php_curl *ch, zend_long option, zval *zvalue
 					return FAILURE;
 			}
 			error = curl_easy_setopt(ch->cp, option, lval);
+			if (option == CURLOPT_MAXCONNECTS && error == CURLE_OK) {
+				ch->maxconnects = (long) lval;
+			}
 			break;
 		case CURLOPT_SAFE_UPLOAD:
 			if (!zend_is_true(zvalue)) {
@@ -2524,7 +2531,7 @@ static int php_curl_socket_callback(CURL *easy, curl_socket_t s, int what, void 
 static int php_curl_timer_callback(CURLM *multi, long timeout_ms, void *userp)
 {
 	php_curl *ch = (php_curl *)userp;
-	ch->io_timer_ms = timeout_ms;
+	ch->io_timer = php_io_deadline_from_ms(timeout_ms);
 	return 0;
 }
 
@@ -2616,6 +2623,9 @@ static CURLcode php_curl_exec_multi(php_curl *ch)
 	}
 	CURLM *multi = ch->multi;
 
+	/* curl_easy_perform() does the same with its private multi */
+	curl_multi_setopt(multi, CURLMOPT_MAXCONNECTS, ch->maxconnects);
+
 	CURLMcode mres = curl_multi_add_handle(multi, ch->cp);
 	if (mres != CURLM_OK) {
 		return mres == CURLM_OUT_OF_MEMORY ? CURLE_OUT_OF_MEMORY : CURLE_FAILED_INIT;
@@ -2658,11 +2668,14 @@ static CURLcode php_curl_exec_multi(php_curl *ch)
 		}
 
 		/* Without sockets and without a timer nothing could wake the loop */
-		long wait_ms = ch->io_timer_ms >= 0 ? ch->io_timer_ms : (n_sockets > 0 ? -1 : 1000);
+		php_deadline timer = ch->io_timer;
+		if (php_deadline_is_infinite(&timer) && n_sockets == 0) {
+			timer = php_io_deadline_from_ms(1000);
+		}
 		php_io_op timer_op;
 		uint32_t timer_index = UINT32_MAX;
-		if (wait_ms >= 0) {
-			php_io_op_timer(&timer_op, php_io_deadline_from_ms(wait_ms));
+		if (!php_deadline_is_infinite(&timer)) {
+			php_io_op_timer(&timer_op, timer);
 			timer_index = n_members;
 			members[n_members++] = &timer_op;
 		}
@@ -2713,7 +2726,7 @@ static CURLcode php_curl_exec_multi(php_curl *ch)
 	curl_multi_remove_handle(multi, ch->cp);
 	/* Sockets libcurl released at the end of the transfer */
 	php_curl_socket_reconcile(ch);
-	ch->io_timer_ms = -1;
+	php_deadline_init_infinite(&ch->io_timer);
 
 	return result;
 }
