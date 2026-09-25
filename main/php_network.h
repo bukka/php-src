@@ -405,6 +405,10 @@ struct _php_netstream_data_t	{
 	size_t ownsize;
 	/* the descriptor was blocking before the stream made it non-blocking */
 	bool restore_blocking;
+#ifndef PHP_WIN32
+	/* the process that changed the mode; a forked child leaves it alone */
+	pid_t restore_pid;
+#endif
 };
 typedef struct _php_netstream_data_t php_netstream_data_t;
 

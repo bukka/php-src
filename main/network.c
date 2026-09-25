@@ -1437,6 +1437,7 @@ PHPAPI void php_netstream_set_nonblocking(php_netstream_data_t *sock)
 		sock->restore_blocking = true;
 	}
 #else
+	sock->restore_pid = getpid();
 	int flags = fcntl(sock->socket, F_GETFL);
 	if (flags == -1 || (flags & O_NONBLOCK)) {
 		return;
@@ -1449,7 +1450,11 @@ PHPAPI void php_netstream_set_nonblocking(php_netstream_data_t *sock)
 
 PHPAPI void php_netstream_restore_blocking(php_netstream_data_t *sock)
 {
-	if (sock->restore_blocking && sock->socket != SOCK_ERR) {
+	if (sock->restore_blocking && sock->socket != SOCK_ERR
+#ifndef PHP_WIN32
+			&& sock->restore_pid == getpid()
+#endif
+	) {
 		php_set_sock_blocking(sock->socket, true);
 	}
 	sock->restore_blocking = false;
