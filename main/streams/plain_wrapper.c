@@ -444,6 +444,7 @@ PHPAPI php_stream *_php_stream_popen(const char *command, const char *mode STREA
 	if (fp == NULL) {
 		int err = errno;
 		close(parent_end);
+		while (waitpid(pid, NULL, 0) < 0 && errno == EINTR);
 		errno = err;
 		return NULL;
 	}
@@ -451,6 +452,9 @@ PHPAPI php_stream *_php_stream_popen(const char *command, const char *mode STREA
 	php_stream *stream = _php_stream_fopen_from_pipe(fp, mode STREAMS_REL_CC);
 	if (stream) {
 		((php_stdio_stream_data *) stream->abstract)->child_pid = (int) pid;
+	} else {
+		fclose(fp);
+		while (waitpid(pid, NULL, 0) < 0 && errno == EINTR);
 	}
 	return stream;
 }
