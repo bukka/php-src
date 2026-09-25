@@ -69,6 +69,8 @@ typedef struct {
 	int			type;
 	int			error;
 	int			blocking;
+	/* kept non-blocking by the stream sharing it, blocking is emulated */
+	bool		nonblocking_fd;
 	zval		zstream;
 	zend_object std;
 } php_socket;
@@ -123,6 +125,18 @@ enum sockopt_return {
 
 PHP_SOCKETS_API char *sockets_strerror(int error);
 PHP_SOCKETS_API bool socket_import_file_descriptor(PHP_SOCKET socket, php_socket *retsock);
+
+#define PHP_SOCKET_EMULATES_BLOCKING(sock) ((sock)->blocking && (sock)->nonblocking_fd)
+
+typedef struct {
+	uint64_t end;
+	int optname;
+	bool started;
+} php_socket_waiter;
+
+#define PHP_SOCKET_WAITER(optname) { 0, (optname), false }
+
+bool php_socket_wait_retry(php_socket *sock, php_socket_waiter *w, int events, int flags);
 
 #else
 #define phpext_sockets_ptr NULL

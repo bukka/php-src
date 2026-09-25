@@ -18,6 +18,7 @@
 #endif
 #include <php.h>
 #include "php_sockets.h"
+#include "php_network.h"
 #include "sendrecvmsg.h"
 #include "conversions.h"
 #include <limits.h>
@@ -202,7 +203,10 @@ PHP_FUNCTION(socket_sendmsg)
 		RETURN_FALSE;
 	}
 
-	res = sendmsg(php_sock->bsd_socket, msghdr, (int)flags);
+	php_socket_waiter w = PHP_SOCKET_WAITER(SO_SNDTIMEO);
+	do {
+		res = sendmsg(php_sock->bsd_socket, msghdr, (int)flags);
+	} while (res == -1 && php_socket_wait_retry(php_sock, &w, POLLOUT, (int)flags));
 
 	if (res != -1) {
 		RETVAL_LONG((zend_long)res);
@@ -243,7 +247,10 @@ PHP_FUNCTION(socket_recvmsg)
 		RETURN_FALSE;
 	}
 
-	res = recvmsg(php_sock->bsd_socket, msghdr, (int)flags);
+	php_socket_waiter w = PHP_SOCKET_WAITER(SO_RCVTIMEO);
+	do {
+		res = recvmsg(php_sock->bsd_socket, msghdr, (int)flags);
+	} while (res == -1 && php_socket_wait_retry(php_sock, &w, PHP_POLLREADABLE, (int)flags));
 
 	if (res != -1) {
 		zval *zres, tmp;
