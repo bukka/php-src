@@ -1103,8 +1103,14 @@ PHPAPI php_socket_t php_io_accept(php_stream *stream, php_socket_t fd, struct so
 }
 
 /* A non-blocking connect that is under way: EINPROGRESS, EAGAIN on some
- * systems, WSAEWOULDBLOCK on Windows (where EINPROGRESS is defined as it) */
-#define PHP_IO_CONNECT_PENDING(err) ((err) == EINPROGRESS || (err) == EAGAIN || (err) == EWOULDBLOCK)
+ * systems, WSAEWOULDBLOCK on Windows (where EINPROGRESS is defined as it),
+ * EALREADY for one started before */
+#ifdef PHP_WIN32
+# define PHP_IO_IS_EALREADY(err) ((err) == EALREADY || (err) == WSAEALREADY)
+#else
+# define PHP_IO_IS_EALREADY(err) ((err) == EALREADY)
+#endif
+#define PHP_IO_CONNECT_PENDING(err) ((err) == EINPROGRESS || (err) == EAGAIN || (err) == EWOULDBLOCK || PHP_IO_IS_EALREADY(err))
 
 /* The connect is started once; the wait completes as Ready and the result
  * is read from SO_ERROR, or as Done when the provider connected itself */
@@ -1141,6 +1147,38 @@ PHPAPI int php_io_connect(php_stream *stream, php_socket_t fd, const struct sock
 			ret = -1;
 			break;
 		}
+		if ((result.status == PHP_IO_READY && !started)
+				|| (result.status == PHP_IO_UNSUPPORTED && direct)) {
+			/* The provider only waited, or does not connect: start it
+			 * ourselves and wait for writability */
+			direct = false;
+			if (connect(fd, addr, addrlen) == 0) {
+				break;
+			}
+			if (!PHP_IO_CONNECT_PENDING(php_socket_errno())) {
+				ret = -1;
+				break;
+			}
+			started = true;
+			continue;
+		}
+		if (started && result.status == PHP_IO_DONE && result.res < 0 && PHP_IO_IS_EALREADY(result.error)) {
+			/* A provider that performs the op found our connect still under
+			 * way: wait for its outcome like after a readiness report */
+			php_io_op_poll(&op, f.handle, fd, PHP_POLL_WRITE, *dl);
+			op.stream = stream;
+			if (php_io_run(&op, &result) == FAILURE) {
+				php_io_set_errno(ECANCELED);
+				ret = -1;
+				break;
+			}
+			int n = php_io_poll_result_to_revents(&result, PHP_POLL_WRITE);
+			if (n <= 0) {
+				ret = -1;
+				break;
+			}
+			result.status = PHP_IO_READY;
+		}
 		/* A provider that performs the op connects a socket whose connect
 		 * we started already: EISCONN then means it completed meanwhile
 		 * and the outcome is in SO_ERROR, as after a readiness report */
@@ -1155,19 +1193,6 @@ PHPAPI int php_io_connect(php_stream *stream, php_socket_t fd, const struct sock
 				ret = -1;
 			}
 			break;
-		}
-		if (result.status == PHP_IO_UNSUPPORTED && direct) {
-			/* Start it ourselves and wait for writability instead */
-			direct = false;
-			if (connect(fd, addr, addrlen) == 0) {
-				break;
-			}
-			if (!PHP_IO_CONNECT_PENDING(php_socket_errno())) {
-				ret = -1;
-				break;
-			}
-			started = true;
-			continue;
 		}
 		ssize_t r;
 		if (php_io_data_result(&result, &r)) {
@@ -1186,7 +1211,8 @@ out:
 
 /* Regular files have no readiness form: without F_FILES the call is
  * synchronous. Pipes and character devices keep blocking descriptors, so
- * they wait for readiness first unless the provider performs the op. */
+ * they wait for readiness first unless the provider performs the op; one
+ * the stream made non-blocking gets the plain syscall and never waits. */
 static ssize_t php_io_file_op(php_stream *stream, int fd, php_deadline *dl, bool regular,
 		ssize_t (*syscall_fn)(int, void *, size_t, int64_t), void *buf, size_t len, int64_t offset,
 		void (*prep)(php_io_op *, zend_object *, php_socket_t, void *, size_t, int64_t, php_deadline))
@@ -1202,8 +1228,16 @@ static ssize_t php_io_file_op(php_stream *stream, int fd, php_deadline *dl, bool
 	}
 	memset(&op, 0, sizeof(op));
 
-	bool offload = FG(io_hooks) && (regular ? (flags & PHP_IO_HOOKS_F_FILES) : (flags & (PHP_IO_HOOKS_F_FILES | PHP_IO_HOOKS_F_DIRECT)));
-	bool ready = false;
+	bool nonblock = false;
+#if !defined(PHP_WIN32) && defined(O_NONBLOCK)
+	if (!regular && FG(io_hooks)) {
+		int fl = fcntl(fd, F_GETFL);
+		nonblock = fl >= 0 && (fl & O_NONBLOCK);
+	}
+#endif
+	bool offload = FG(io_hooks) && !nonblock
+			&& (regular ? (flags & PHP_IO_HOOKS_F_FILES) : (flags & (PHP_IO_HOOKS_F_FILES | PHP_IO_HOOKS_F_DIRECT)));
+	bool ready = nonblock;
 	for (;;) {
 		if (offload) {
 			prep(&op, f.handle, fd, buf, len, offset, *dl);
@@ -1502,10 +1536,7 @@ PHPAPI int php_io_sigwait(zend_object *handle, const php_sigset_t *set, php_sigi
 				ret = -1;
 				break;
 			}
-			if (result.status == PHP_IO_DONE && result.error == EAGAIN) {
-				/* Another wait collected the signal first */
-				continue;
-			}
+			bool again = result.status == PHP_IO_DONE && result.error == EAGAIN;
 			if (result.status == PHP_IO_READY) {
 				if (op.u.sigwait.taken > 0) {
 					ret = op.u.sigwait.taken;
@@ -1513,6 +1544,15 @@ PHPAPI int php_io_sigwait(zend_object *handle, const php_sigset_t *set, php_sigi
 				}
 				ret = php_poll_signal_source_take(sfd, set, info);
 				if (ret > 0) {
+					break;
+				}
+				again = true;
+			}
+			if (again) {
+				/* Another wait collected the signal first */
+				if (!php_deadline_is_infinite(dl) && php_io_deadline_remaining(dl, zend_hrtime()) == 0) {
+					php_io_set_errno(EAGAIN);
+					ret = -1;
 					break;
 				}
 				continue;
