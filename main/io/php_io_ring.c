@@ -39,15 +39,18 @@ struct _php_io_ring_req {
 	php_io_op *op;
 	void *data;
 	php_io_op_type type;
+	php_deadline deadline;
 	php_io_op_result result;
 	int32_t main_res;               /* the main cqe's result, -1 until then */
+	ior_timespec ts;                /* the timer's or the linked timeout's */
 	php_io_ring_req *group;         /* member: the Any's request */
 	uint32_t index;                 /* member: position in the Any */
 	bool has_lt;                    /* a linked timeout was submitted */
 	bool main_done;                 /* the main cqe was reaped */
 	bool lt_done;                   /* the linked timeout's cqe was reaped */
-	int32_t lt_res;
 	bool cancelled;                 /* cancel() was called */
+	bool cancel_pending;            /* the cancel still needs an entry */
+	bool backlogged;                /* waiting for room in the ring */
 	bool orphaned;                  /* nobody wants the completion */
 	bool delivered;                 /* the output went to the op */
 	php_stream *orphan_stream;      /* frozen until the record settled */
@@ -56,9 +59,10 @@ struct _php_io_ring_req {
 	bool group_done;                /* member: the group folded already */
 	php_io_ring_req **members;      /* group */
 	uint32_t n_members;
-	uint32_t n_settled;             /* group: members whose cqes all arrived */
 	php_io_ring_req *prev;          /* live list */
 	php_io_ring_req *next;
+	php_io_ring_req *bl_prev;       /* backlog */
+	php_io_ring_req *bl_next;
 	union {
 		struct { char *node; char *service; struct addrinfo hints; bool has_hints;
 		         struct addrinfo *res; } gai;
@@ -71,13 +75,24 @@ struct _php_io_ring_req {
 	} u;
 };
 
+typedef struct {
+	uintptr_t data;
+	int32_t res;
+} php_io_ring_cqe;
+
 struct php_io_ring {
 	ior_ctx *ctx;
 	uint32_t features;
 	bool fd_nonblock;
 	pid_t owner_pid;                /* a child inherits the ring but must not touch it */
+	uint32_t cap;                   /* completion queue size */
+	uint32_t in_ring;               /* entries taken whose cqe was not reaped yet */
+	uint32_t unsubmitted;           /* entries taken but not accepted by a submit yet */
 	php_io_ring_req *live;          /* every record with a cqe outstanding or a completion to deliver */
-	uint32_t pending;               /* submitted ops not yet delivered, orphans included */
+	uint32_t pending;               /* submitted ops not yet delivered, orphans excluded */
+	uint32_t n_cancel_pending;
+	php_io_ring_req *bl_head;       /* ops waiting for room, oldest first */
+	php_io_ring_req *bl_tail;
 	php_io_ring_req **ready;
 	uint32_t n_ready;
 	uint32_t ready_cap;
@@ -85,6 +100,7 @@ struct php_io_ring {
 	uint32_t n_fired;
 	uint32_t fired_cap;
 	ior_cqe **cqes;
+	php_io_ring_cqe *batch;
 	uint32_t cqes_cap;
 	bool notify_created;
 };
@@ -94,6 +110,12 @@ struct php_io_ring {
 #define PHP_IO_RING_TAG_LT     ((uintptr_t) 1)
 #define PHP_IO_RING_TAG_CANCEL ((uintptr_t) 2)
 #define PHP_IO_RING_TAG_MASK   ((uintptr_t) 3)
+
+/* liburing's own timeout on kernels without IORING_FEAT_EXT_ARG */
+#define PHP_IO_RING_UDATA_INTERNAL UINTPTR_MAX
+
+/* Entries new ops leave free, so that cancels always find one */
+#define PHP_IO_RING_CANCEL_RESERVE 4
 
 /* Every cqe of the record arrived */
 static zend_always_inline bool php_io_ring_req_settled(php_io_ring_req *req)
@@ -138,8 +160,17 @@ PHPAPI php_io_ring *php_io_ring_create(uint32_t entries, bool fd_nonblock)
 		params.flags |= IOR_SETUP_FD_NONBLOCK;
 	}
 
+	/* An op and its linked timeout go in one submission */
+	uint32_t sq = MAX(entries ? entries : PHP_IO_RING_DEFAULT_ENTRIES, 2);
+	uint32_t cq = 32;
+	while (cq < (uint64_t) sq * 2 && cq < (UINT32_C(1) << 31)) {
+		cq <<= 1;
+	}
+	params.sq_entries = sq;
+	params.cq_entries = cq;
+
 	ior_ctx *ctx;
-	int rc = ior_queue_init_params(entries ? entries : PHP_IO_RING_DEFAULT_ENTRIES, &ctx, &params);
+	int rc = ior_queue_init_params(sq, &ctx, &params);
 	if (rc < 0) {
 		errno = -rc;
 		return NULL;
@@ -150,8 +181,10 @@ PHPAPI php_io_ring *php_io_ring_create(uint32_t entries, bool fd_nonblock)
 	ring->features = params.features;
 	ring->owner_pid = getpid();
 	ring->fd_nonblock = fd_nonblock;
+	ring->cap = cq;
 	ring->cqes_cap = 64;
 	ring->cqes = safe_emalloc(ring->cqes_cap, sizeof(*ring->cqes), 0);
+	ring->batch = safe_emalloc(ring->cqes_cap, sizeof(*ring->batch), 0);
 	return ring;
 }
 
@@ -372,6 +405,7 @@ static php_io_ring_req *php_io_ring_req_create(php_io_ring *ring, php_io_op *op,
 	req->op = op;
 	req->data = data;
 	req->type = op->type;
+	req->deadline = op->deadline;
 	req->main_res = -1;
 	php_io_ring_req_capture(req, op);
 	req->next = ring->live;
@@ -382,11 +416,46 @@ static php_io_ring_req *php_io_ring_req_create(php_io_ring *ring, php_io_op *op,
 	return req;
 }
 
+static void php_io_ring_backlog_push(php_io_ring *ring, php_io_ring_req *req)
+{
+	req->backlogged = true;
+	req->bl_next = NULL;
+	req->bl_prev = ring->bl_tail;
+	if (ring->bl_tail) {
+		ring->bl_tail->bl_next = req;
+	} else {
+		ring->bl_head = req;
+	}
+	ring->bl_tail = req;
+}
+
+static void php_io_ring_backlog_remove(php_io_ring *ring, php_io_ring_req *req)
+{
+	if (req->bl_prev) {
+		req->bl_prev->bl_next = req->bl_next;
+	} else {
+		ring->bl_head = req->bl_next;
+	}
+	if (req->bl_next) {
+		req->bl_next->bl_prev = req->bl_prev;
+	} else {
+		ring->bl_tail = req->bl_prev;
+	}
+	req->bl_prev = req->bl_next = NULL;
+	req->backlogged = false;
+}
+
 static void php_io_ring_req_free(php_io_ring *ring, php_io_ring_req *req)
 {
 	if (req->orphan_stream) {
 		php_io_stream_unfreeze(req->orphan_stream);
 		req->orphan_stream = NULL;
+	}
+	if (req->backlogged) {
+		php_io_ring_backlog_remove(ring, req);
+	}
+	if (req->cancel_pending) {
+		ring->n_cancel_pending--;
 	}
 	if (req->prev) {
 		req->prev->next = req->next;
@@ -475,7 +544,7 @@ static uint32_t php_io_ring_poll_mask_from_ior(uint32_t mask)
 
 /* Relative, because zend_hrtime() runs on CLOCK_MONOTONIC_RAW where it
  * exists and ior's absolute deadlines offer the monotonic, boot-time and
- * wall clocks; ior copies the timespec at submit */
+ * wall clocks */
 static void php_io_ring_deadline_to_ts(const php_deadline *dl, ior_timespec *ts)
 {
 	zend_hrtime_t remaining = php_io_deadline_remaining(dl, zend_hrtime());
@@ -483,9 +552,19 @@ static void php_io_ring_deadline_to_ts(const php_deadline *dl, ior_timespec *ts)
 	ts->tv_nsec = (long long) (remaining % ZEND_NANO_IN_SEC);
 }
 
-/* Preps and submits one op (a member of an Any included). Returns FAILURE
- * with errno set when the submission queue is full or the op has no ring
- * form; the caller decides what that means for the op. */
+/* Entries the last submits left behind are tried again */
+static int php_io_ring_flush(php_io_ring *ring)
+{
+	if (ring->unsubmitted == 0) {
+		return 0;
+	}
+	int rc = ior_submit(ring->ctx);
+	if (rc >= 0) {
+		ring->unsubmitted = rc == 0 ? 0 : ring->unsubmitted - MIN((uint32_t) rc, ring->unsubmitted);
+	}
+	return rc;
+}
+
 /* An entry taken for a prep that failed: a nop whose completion carries no
  * record, so the next submit issues nothing stale */
 static void php_io_ring_sqe_void(ior_ctx *ctx, ior_sqe *sqe)
@@ -494,17 +573,47 @@ static void php_io_ring_sqe_void(ior_ctx *ctx, ior_sqe *sqe)
 	ior_sqe_set_data(ctx, sqe, NULL);
 }
 
+/* Takes n entries or none. The completion queue has room for every entry
+ * taken (so posting never waits for a reap), and new ops leave some for
+ * cancels. */
+static bool php_io_ring_get_sqes(php_io_ring *ring, ior_sqe **sqes, uint32_t n, bool new_op)
+{
+	uint32_t reserve = new_op ? PHP_IO_RING_CANCEL_RESERVE : 0;
+	for (int attempt = 0; attempt < 2; attempt++) {
+		if ((uint64_t) ring->in_ring + n + reserve > ring->cap) {
+			return false;
+		}
+		uint32_t got = 0;
+		while (got < n && (sqes[got] = ior_get_sqe(ring->ctx)) != NULL) {
+			got++;
+		}
+		ring->in_ring += got;
+		ring->unsubmitted += got;
+		if (got == n) {
+			return true;
+		}
+		for (uint32_t i = 0; i < got; i++) {
+			php_io_ring_sqe_void(ring->ctx, sqes[i]);
+		}
+		php_io_ring_flush(ring);
+	}
+	return false;
+}
+
+/* Preps and submits one op (a member of an Any included). Returns FAILURE
+ * with errno set: EBUSY when the ring has no room now, ENOTSUP when the op
+ * has no ring form. */
 static zend_result php_io_ring_submit_one(php_io_ring *ring, php_io_ring_req *req)
 {
 	php_io_op *op = req->op;
 	ior_ctx *ctx = ring->ctx;
-	bool link_deadline = !php_deadline_is_infinite(&op->deadline) && op->type != PHP_IO_OP_TIMER;
-	ior_timespec ts;   /* read by ior_submit() below */
+	bool link_deadline = !php_deadline_is_infinite(&req->deadline) && req->type != PHP_IO_OP_TIMER;
+	bool uses_caller = false;       /* the backend references the op's buffer or descriptor */
+	ior_sqe *sqes[2];
+	int err = 0;
 
-	/* What has no ring form is refused before an entry is taken: a taken
-	 * entry cannot be given back, and the next submit would issue it with
-	 * whatever it still holds */
-	switch (op->type) {
+	/* What has no ring form is refused before an entry is taken */
+	switch (req->type) {
 		case PHP_IO_OP_POLL:
 			if (!(ring->features & IOR_FEAT_POLL_ADD)) {
 				errno = ENOTSUP;
@@ -512,7 +621,7 @@ static zend_result php_io_ring_submit_one(php_io_ring *ring, php_io_ring_req *re
 			}
 			break;
 		case PHP_IO_OP_TIMER:
-			if (php_deadline_is_infinite(&op->deadline)) {
+			if (php_deadline_is_infinite(&req->deadline)) {
 				/* Never fires: ior_prep_nop would end it at once */
 				errno = ENOTSUP;
 				return FAILURE;
@@ -535,126 +644,163 @@ static zend_result php_io_ring_submit_one(php_io_ring *ring, php_io_ring_req *re
 			return FAILURE;
 	}
 
-	ior_sqe *sqe = ior_get_sqe(ctx);
-	if (!sqe) {
+	if (!php_io_ring_get_sqes(ring, sqes, link_deadline ? 2 : 1, true)) {
 		errno = EBUSY;
 		return FAILURE;
 	}
+	ior_sqe *sqe = sqes[0];
 
-	switch (op->type) {
+	switch (req->type) {
 		case PHP_IO_OP_POLL:
 			ior_prep_poll_add(ctx, sqe, (ior_fd_t) op->fd, php_io_ring_poll_mask_to_ior(op->u.poll.events));
 			break;
 		case PHP_IO_OP_TIMER:
-			php_io_ring_deadline_to_ts(&op->deadline, &ts);
-			ior_prep_timeout(ctx, sqe, &ts, 0, 0);
+			php_io_ring_deadline_to_ts(&req->deadline, &req->ts);
+			ior_prep_timeout(ctx, sqe, &req->ts, 0, 0);
 			break;
 		case PHP_IO_OP_READ:
 			ior_prep_read(ctx, sqe, php_io_ring_file_fd(op), op->u.io.buf, (unsigned) MIN(op->u.io.len, UINT32_MAX),
 					op->u.io.offset < 0 ? IOR_OFF_NONE : (uint64_t) op->u.io.offset);
-			op->in_flight = true;
+			uses_caller = true;
 			break;
 		case PHP_IO_OP_WRITE:
 			ior_prep_write(ctx, sqe, php_io_ring_file_fd(op), op->u.io.buf, (unsigned) MIN(op->u.io.len, UINT32_MAX),
 					op->u.io.offset < 0 ? IOR_OFF_NONE : (uint64_t) op->u.io.offset);
-			op->in_flight = true;
+			uses_caller = true;
 			break;
 		case PHP_IO_OP_RECV:
 			ior_prep_recv(ctx, sqe, (ior_fd_t) op->fd, op->u.io.buf, (unsigned) MIN(op->u.io.len, UINT32_MAX), op->u.io.flags);
-			op->in_flight = true;
+			uses_caller = true;
 			break;
 		case PHP_IO_OP_SEND:
 			ior_prep_send(ctx, sqe, (ior_fd_t) op->fd, op->u.io.buf, (unsigned) MIN(op->u.io.len, UINT32_MAX), op->u.io.flags);
-			op->in_flight = true;
+			uses_caller = true;
 			break;
 		case PHP_IO_OP_ACCEPT:
 			ior_prep_accept(ctx, sqe, (ior_fd_t) op->fd, req->u.sock.addr, req->u.sock.addr ? &req->u.sock.addrlen : NULL,
 					IOR_ACCEPT_CLOEXEC | (ring->fd_nonblock ? IOR_ACCEPT_NONBLOCK : 0));
-			op->in_flight = true;
+			uses_caller = true;
 			break;
 		case PHP_IO_OP_CONNECT:
 			ior_prep_connect(ctx, sqe, (ior_fd_t) op->fd, req->u.sock.addr, req->u.sock.addrlen);
-			op->in_flight = true;
+			uses_caller = true;
 			break;
 		case PHP_IO_OP_GETADDRINFO:
-			if (ior_prep_work(ctx, sqe, php_io_ring_work_getaddrinfo, req) < 0) {
-				php_io_ring_sqe_void(ctx, sqe);
-				errno = ENOTSUP;
-				return FAILURE;
-			}
+			err = ior_prep_work(ctx, sqe, php_io_ring_work_getaddrinfo, req) < 0 ? ENOTSUP : 0;
 			break;
 		case PHP_IO_OP_GETNAMEINFO:
-			if (ior_prep_work(ctx, sqe, php_io_ring_work_getnameinfo, req) < 0) {
-				php_io_ring_sqe_void(ctx, sqe);
-				errno = ENOTSUP;
-				return FAILURE;
-			}
+			err = ior_prep_work(ctx, sqe, php_io_ring_work_getnameinfo, req) < 0 ? ENOTSUP : 0;
 			break;
 		case PHP_IO_OP_FSYNC:
-			if (ior_prep_work(ctx, sqe, php_io_ring_work_fsync, req) < 0) {
-				php_io_ring_sqe_void(ctx, sqe);
-				errno = ENOTSUP;
-				return FAILURE;
-			}
-			op->in_flight = true;
+			err = ior_prep_work(ctx, sqe, php_io_ring_work_fsync, req) < 0 ? ENOTSUP : 0;
+			uses_caller = true;
 			break;
 		case PHP_IO_OP_WAITPID:
-			if (ior_prep_waitpid(ctx, sqe, (ior_pid_t) op->u.waitpid.pid, &req->u.waitpid.status, op->u.waitpid.options) < 0) {
-				php_io_ring_sqe_void(ctx, sqe);
-				errno = ENOTSUP;
-				return FAILURE;
-			}
+			err = ior_prep_waitpid(ctx, sqe, (ior_pid_t) op->u.waitpid.pid, &req->u.waitpid.status, op->u.waitpid.options) < 0 ? ENOTSUP : 0;
 			break;
 		case PHP_IO_OP_SIGWAIT: {
 			int rc = ior_prep_sigwait(ctx, sqe, (const ior_sigset_t *) &req->u.sigwait.set, (ior_siginfo_t *) &req->u.sigwait.info);
-			if (rc < 0) {
-				php_io_ring_sqe_void(ctx, sqe);
-				errno = -rc;
-				return FAILURE;
-			}
+			err = rc < 0 ? -rc : 0;
 			break;
 		}
 		default:
 			ZEND_UNREACHABLE();
 	}
 
+	if (err) {
+		php_io_ring_sqe_void(ctx, sqe);
+		if (link_deadline) {
+			php_io_ring_sqe_void(ctx, sqes[1]);
+		}
+		php_io_ring_flush(ring);
+		errno = err;
+		return FAILURE;
+	}
+
+	if (uses_caller) {
+		op->in_flight = true;
+	}
 	ior_sqe_set_data(ctx, sqe, req);
 
 	if (link_deadline) {
-		ior_sqe *lt = ior_get_sqe(ctx);
-		if (!lt) {
-			/* The prepared entry cannot be taken back: submit it unbounded */
-			ior_submit(ctx);
-		} else {
-			ior_sqe_set_flags(ctx, sqe, IOR_SQE_IO_LINK);
-			php_io_ring_deadline_to_ts(&op->deadline, &ts);
-			ior_prep_link_timeout(ctx, lt, &ts, 0);
-			ior_sqe_set_data(ctx, lt, (void *) ((uintptr_t) req | PHP_IO_RING_TAG_LT));
-			req->has_lt = true;
-		}
+		ior_sqe_set_flags(ctx, sqe, IOR_SQE_IO_LINK);
+		php_io_ring_deadline_to_ts(&req->deadline, &req->ts);
+		ior_prep_link_timeout(ctx, sqes[1], &req->ts, 0);
+		ior_sqe_set_data(ctx, sqes[1], (void *) ((uintptr_t) req | PHP_IO_RING_TAG_LT));
+		req->has_lt = true;
 	}
 
-	int rc = ior_submit(ctx);
-	if (rc < 0) {
-		/* The entries stay queued in ior and are retried by the next submit */
-		errno = -rc;
-	}
+	/* What a failed or short submit leaves is tried again before a wait blocks */
+	php_io_ring_flush(ring);
 	return SUCCESS;
 }
 
-static void php_io_ring_submit_cancel(php_io_ring *ring, php_io_ring_req *req)
+static bool php_io_ring_submit_cancel(php_io_ring *ring, php_io_ring_req *req)
 {
-	ior_sqe *sqe = ior_get_sqe(ring->ctx);
-	if (!sqe) {
-		ior_submit(ring->ctx);
-		sqe = ior_get_sqe(ring->ctx);
-		if (!sqe) {
-			return;
-		}
+	ior_sqe *sqe;
+	if (!php_io_ring_get_sqes(ring, &sqe, 1, false)) {
+		return false;
 	}
 	ior_prep_cancel(ring->ctx, sqe, req);
 	ior_sqe_set_data(ring->ctx, sqe, (void *) ((uintptr_t) req | PHP_IO_RING_TAG_CANCEL));
-	ior_submit(ring->ctx);
+	php_io_ring_flush(ring);
+	return true;
+}
+
+/* A completion to hand out: the member fires its group, anything else is ready */
+static void php_io_ring_req_complete(php_io_ring *ring, php_io_ring_req *req)
+{
+	if (req->group) {
+		if (!req->group->group_done && !req->group->fired) {
+			req->group->fired = true;
+			php_io_ring_list_push(&ring->fired, &ring->n_fired, &ring->fired_cap, req->group);
+		}
+		return;
+	}
+	req->ready = true;
+	php_io_ring_list_push(&ring->ready, &ring->n_ready, &ring->ready_cap, req);
+}
+
+/* The op completes without reaching the backend */
+static void php_io_ring_req_fail(php_io_ring *ring, php_io_ring_req *req, int err)
+{
+	req->main_done = true;
+	req->result.status = err == ENOTSUP ? PHP_IO_UNSUPPORTED : PHP_IO_DONE;
+	req->result.index = req->index;
+	req->result.res = -1;
+	req->result.error = err == ENOTSUP ? 0 : err;
+	php_io_ring_req_complete(ring, req);
+}
+
+/* Submitted, or kept in the backlog until the ring has room; false when
+ * the op failed, errno set */
+static bool php_io_ring_start(php_io_ring *ring, php_io_ring_req *req)
+{
+	if (!ring->bl_head && php_io_ring_submit_one(ring, req) == SUCCESS) {
+		return true;
+	}
+	if (ring->bl_head || errno == EBUSY) {
+		php_io_ring_backlog_push(ring, req);
+		return true;
+	}
+	return false;
+}
+
+static void php_io_ring_flush_backlog(php_io_ring *ring)
+{
+	while (ring->bl_head) {
+		php_io_ring_req *req = ring->bl_head;
+		if (php_io_ring_submit_one(ring, req) == SUCCESS) {
+			php_io_ring_backlog_remove(ring, req);
+			continue;
+		}
+		if (errno == EBUSY) {
+			break;
+		}
+		int err = errno;
+		php_io_ring_backlog_remove(ring, req);
+		php_io_ring_req_fail(ring, req, err);
+	}
 }
 
 PHPAPI zend_result php_io_ring_submit_op(php_io_ring *ring, php_io_op *op, void *data)
@@ -685,44 +831,59 @@ PHPAPI zend_result php_io_ring_submit_op(php_io_ring *ring, php_io_op *op, void 
 			op->u.any.ops[i]->queue_data = m;
 			req->members[i] = m;
 		}
-		bool any_fired = false;
 		for (uint32_t i = 0; i < n; i++) {
 			php_io_ring_req *m = req->members[i];
-			if (php_io_ring_submit_one(ring, m) != SUCCESS) {
+			if (!php_io_ring_start(ring, m)) {
 				/* A member without a ring form completes at once */
-				m->main_done = true;
-				m->result.status = errno == ENOTSUP ? PHP_IO_UNSUPPORTED : PHP_IO_DONE;
-				m->result.index = i;
-				m->result.res = -1;
-				m->result.error = errno == ENOTSUP ? 0 : errno;
-				any_fired = true;
+				php_io_ring_req_fail(ring, m, errno);
 			}
 		}
-		if (any_fired || n == 0) {
+		if (n == 0) {
 			req->fired = true;
 			php_io_ring_list_push(&ring->fired, &ring->n_fired, &ring->fired_cap, req);
 		}
 		return SUCCESS;
 	}
 
-	if (php_io_ring_submit_one(ring, req) != SUCCESS) {
-		req->main_done = true;
-		req->ready = true;
-		req->result.status = errno == ENOTSUP ? PHP_IO_UNSUPPORTED : PHP_IO_DONE;
-		req->result.index = 0;
-		req->result.res = -1;
-		req->result.error = errno == ENOTSUP ? 0 : errno;
-		php_io_ring_list_push(&ring->ready, &ring->n_ready, &ring->ready_cap, req);
+	if (!php_io_ring_start(ring, req)) {
+		php_io_ring_req_fail(ring, req, errno);
 	}
 	return SUCCESS;
 }
 
-/* Cancel every cqe-producing submission of a record */
+/* Cancel every cqe-producing submission of a record; one still in the
+ * backlog never reached the backend and settles at once */
 static void php_io_ring_req_cancel(php_io_ring *ring, php_io_ring_req *req)
 {
+	if (req->backlogged) {
+		php_io_ring_backlog_remove(ring, req);
+		req->main_done = true;
+		return;
+	}
 	if (!req->main_done && !req->cancelled) {
 		req->cancelled = true;
-		php_io_ring_submit_cancel(ring, req);
+		if (!php_io_ring_submit_cancel(ring, req)) {
+			req->cancel_pending = true;
+			ring->n_cancel_pending++;
+		}
+	}
+}
+
+/* Cancels that found no entry, one at a time with a reap in between */
+static void php_io_ring_retry_cancels(php_io_ring *ring)
+{
+	while (ring->n_cancel_pending) {
+		php_io_ring_req *target = ring->live;
+		while (target && !target->cancel_pending) {
+			target = target->next;
+		}
+		ZEND_ASSERT(target);
+		if (!php_io_ring_submit_cancel(ring, target)) {
+			return;
+		}
+		target->cancel_pending = false;
+		ring->n_cancel_pending--;
+		php_io_ring_reap(ring);
 	}
 }
 
@@ -755,6 +916,9 @@ static void php_io_ring_req_release(php_io_ring *ring, php_io_ring_req *req)
 static void php_io_ring_req_cancel_or_forget(php_io_ring *ring, php_io_ring_req *req)
 {
 	if (php_io_ring_foreign(ring)) {
+		if (req->backlogged) {
+			php_io_ring_backlog_remove(ring, req);
+		}
 		req->main_done = true;
 		req->lt_done = true;
 		req->delivered = true;
@@ -815,33 +979,6 @@ PHPAPI bool php_io_ring_orphan(php_io_ring *ring, php_io_op *op)
 	return keep;
 }
 
-/* Wait until every orphaned op on the stream settled; other completions
- * stay queued for delivery */
-PHPAPI void php_io_ring_drain(php_io_ring *ring, php_stream *stream)
-{
-	if (php_io_ring_foreign(ring)) {
-		return;
-	}
-	for (;;) {
-		bool pending = false;
-		for (php_io_ring_req *r = ring->live; r; r = r->next) {
-			if (r->orphan_stream == stream) {
-				pending = true;
-				break;
-			}
-		}
-		if (!pending) {
-			return;
-		}
-		ior_cqe *cqe;
-		int rc = ior_wait_cqe(ring->ctx, &cqe);
-		if (rc < 0 && rc != -EINTR) {
-			return;
-		}
-		php_io_ring_reap(ring);
-	}
-}
-
 /* Completion processing */
 
 static void php_io_ring_result_from_cqe(php_io_ring_req *req, int32_t res)
@@ -898,6 +1035,10 @@ static void php_io_ring_req_main_cqe(php_io_ring *ring, php_io_ring_req *req, in
 {
 	req->main_done = true;
 	req->main_res = res;
+	if (req->cancel_pending) {
+		req->cancel_pending = false;
+		ring->n_cancel_pending--;
+	}
 	if (req->op) {
 		req->op->in_flight = false;
 	}
@@ -910,23 +1051,12 @@ static void php_io_ring_req_main_cqe(php_io_ring *ring, php_io_ring_req *req, in
 	}
 
 	php_io_ring_result_from_cqe(req, res);
-
-	if (req->group) {
-		if (!req->group->group_done && !req->group->fired) {
-			req->group->fired = true;
-			php_io_ring_list_push(&ring->fired, &ring->n_fired, &ring->fired_cap, req->group);
-		}
-		return;
-	}
-
-	req->ready = true;
-	php_io_ring_list_push(&ring->ready, &ring->n_ready, &ring->ready_cap, req);
+	php_io_ring_req_complete(ring, req);
 }
 
-static void php_io_ring_req_lt_cqe(php_io_ring *ring, php_io_ring_req *req, int32_t res)
+static void php_io_ring_req_lt_cqe(php_io_ring *ring, php_io_ring_req *req)
 {
 	req->lt_done = true;
-	req->lt_res = res;
 	if (req->orphaned && php_io_ring_req_settled(req)) {
 		php_io_ring_req_free(ring, req);
 	}
@@ -976,18 +1106,20 @@ static void php_io_ring_fold_all(php_io_ring *ring)
 	}
 }
 
-static void php_io_ring_process_cqe(php_io_ring *ring, ior_cqe *cqe)
+static void php_io_ring_process_cqe(php_io_ring *ring, uintptr_t data, int32_t res)
 {
-	uintptr_t data = (uintptr_t) ior_cqe_get_data(ring->ctx, cqe);
-	int32_t res = ior_cqe_get_res(ring->ctx, cqe);
-	php_io_ring_req *req = (php_io_ring_req *) (data & ~PHP_IO_RING_TAG_MASK);
+	if (data == PHP_IO_RING_UDATA_INTERNAL) {
+		return;
+	}
+	ring->in_ring--;
 
+	php_io_ring_req *req = (php_io_ring_req *) (data & ~PHP_IO_RING_TAG_MASK);
 	if (!req) {
 		return;
 	}
 	switch (data & PHP_IO_RING_TAG_MASK) {
 		case PHP_IO_RING_TAG_LT:
-			php_io_ring_req_lt_cqe(ring, req, res);
+			php_io_ring_req_lt_cqe(ring, req);
 			break;
 		case PHP_IO_RING_TAG_CANCEL:
 			/* The target completes on its own, whatever the cancel reported */
@@ -998,7 +1130,8 @@ static void php_io_ring_process_cqe(php_io_ring *ring, ior_cqe *cqe)
 	}
 }
 
-/* Take everything the ring has */
+/* Take everything the ring has. The batch is consumed before it is
+ * processed, so a cancel submitted meanwhile finds the room it needs. */
 static uint32_t php_io_ring_reap(php_io_ring *ring)
 {
 	uint32_t total = 0;
@@ -1008,9 +1141,13 @@ static uint32_t php_io_ring_reap(php_io_ring *ring)
 			break;
 		}
 		for (unsigned i = 0; i < n; i++) {
-			php_io_ring_process_cqe(ring, ring->cqes[i]);
+			ring->batch[i].data = (uintptr_t) ior_cqe_get_data(ring->ctx, ring->cqes[i]);
+			ring->batch[i].res = ior_cqe_get_res(ring->ctx, ring->cqes[i]);
 		}
 		ior_cq_advance(ring->ctx, n);
+		for (unsigned i = 0; i < n; i++) {
+			php_io_ring_process_cqe(ring, ring->batch[i].data, ring->batch[i].res);
+		}
 		total += n;
 		if (n < ring->cqes_cap) {
 			break;
@@ -1018,6 +1155,64 @@ static uint32_t php_io_ring_reap(php_io_ring *ring)
 	}
 	php_io_ring_fold_all(ring);
 	return total;
+}
+
+/* Everything that needs no waiting */
+static void php_io_ring_progress(php_io_ring *ring)
+{
+	php_io_ring_reap(ring);
+	php_io_ring_retry_cancels(ring);
+	php_io_ring_flush_backlog(ring);
+	php_io_ring_flush(ring);
+}
+
+/* Ops still in the backlog at their deadline time out here; returns the
+ * next such deadline */
+static zend_hrtime_t php_io_ring_expire_backlog(php_io_ring *ring, zend_hrtime_t now)
+{
+	zend_hrtime_t next = ZEND_HRTIME_T_MAX;
+	php_io_ring_req *r = ring->bl_head;
+	while (r) {
+		php_io_ring_req *bl_next = r->bl_next;
+		if (!php_deadline_is_infinite(&r->deadline)) {
+			if (r->deadline.hrtime <= now) {
+				php_io_ring_backlog_remove(ring, r);
+				php_io_ring_req_main_cqe(ring, r, -ETIME);
+			} else if (r->deadline.hrtime < next) {
+				next = r->deadline.hrtime;
+			}
+		}
+		r = bl_next;
+	}
+	php_io_ring_fold_all(ring);
+	return next;
+}
+
+/* Wait until every orphaned op on the stream settled; other completions
+ * stay queued for delivery */
+PHPAPI void php_io_ring_drain(php_io_ring *ring, php_stream *stream)
+{
+	if (php_io_ring_foreign(ring)) {
+		return;
+	}
+	for (;;) {
+		php_io_ring_progress(ring);
+		bool pending = false;
+		for (php_io_ring_req *r = ring->live; r; r = r->next) {
+			if (r->orphan_stream == stream) {
+				pending = true;
+				break;
+			}
+		}
+		if (!pending) {
+			return;
+		}
+		ior_cqe *cqe;
+		int rc = ior_wait_cqe(ring->ctx, &cqe);
+		if (rc < 0 && rc != -EINTR) {
+			return;
+		}
+	}
 }
 
 static uint32_t php_io_ring_deliver(php_io_ring *ring, php_io_queue_completion *out, uint32_t max)
@@ -1072,11 +1267,13 @@ PHPAPI int php_io_ring_wait(php_io_ring *ring, php_io_queue_completion *out, uin
 	}
 
 	for (;;) {
-		php_io_ring_reap(ring);
+		php_io_ring_progress(ring);
+		zend_hrtime_t now = zend_hrtime();
+		zend_hrtime_t next = php_io_ring_expire_backlog(ring, now);
 		if (ring->n_ready) {
 			return (int) php_io_ring_deliver(ring, out, max);
 		}
-		if (limit != ZEND_HRTIME_T_MAX && zend_hrtime() >= limit) {
+		if (limit != ZEND_HRTIME_T_MAX && now >= limit) {
 			return 0;
 		}
 		if (ring->pending == 0) {
@@ -1090,28 +1287,30 @@ PHPAPI int php_io_ring_wait(php_io_ring *ring, php_io_queue_completion *out, uin
 			}
 		}
 
+		if (ring->unsubmitted) {
+			int rc = php_io_ring_flush(ring);
+			if (rc < 0 && rc != -EAGAIN && rc != -EBUSY && rc != -EINTR) {
+				errno = -rc;
+				return -1;
+			}
+		}
+
 		ior_cqe *cqe;
 		int rc;
-		if (limit == ZEND_HRTIME_T_MAX) {
+		zend_hrtime_t until = MIN(limit, next);
+		if (until == ZEND_HRTIME_T_MAX) {
 			rc = ior_wait_cqe(ring->ctx, &cqe);
 		} else {
-			zend_hrtime_t now = zend_hrtime();
-			zend_hrtime_t remaining = limit > now ? limit - now : 0;
+			now = zend_hrtime();
+			zend_hrtime_t remaining = until > now ? until - now : 0;
 			ior_timespec ts = { .tv_sec = (int64_t) (remaining / ZEND_NANO_IN_SEC), .tv_nsec = (long long) (remaining % ZEND_NANO_IN_SEC) };
 			rc = ior_wait_cqe_timeout(ring->ctx, &cqe, &ts);
 		}
-		if (rc == -ETIME) {
-			php_io_ring_reap(ring);
-			return (int) php_io_ring_deliver(ring, out, max);
-		}
-		if (rc == -EINTR) {
-			continue;
-		}
-		if (rc < 0) {
+		if (rc < 0 && rc != -ETIME && rc != -EINTR) {
 			errno = -rc;
 			return -1;
 		}
-		/* The next reap consumes it */
+		/* The next pass consumes it */
 	}
 }
 
@@ -1127,6 +1326,10 @@ PHPAPI void php_io_ring_destroy(php_io_ring *ring)
 			r->op->queue_data = NULL;
 			r->op->in_flight = false;
 			r->op = NULL;
+		}
+		if (r->backlogged) {
+			php_io_ring_backlog_remove(ring, r);
+			r->main_done = true;
 		}
 		if (foreign) {
 			r->main_done = true;
@@ -1157,6 +1360,7 @@ PHPAPI void php_io_ring_destroy(php_io_ring *ring)
 		if (!ring->live) {
 			break;
 		}
+		php_io_ring_retry_cancels(ring);
 		ior_cqe *cqe;
 		int rc = ior_wait_cqe(ring->ctx, &cqe);
 		if (rc < 0 && rc != -EINTR) {
@@ -1177,6 +1381,7 @@ PHPAPI void php_io_ring_destroy(php_io_ring *ring)
 		efree(ring->fired);
 	}
 	efree(ring->cqes);
+	efree(ring->batch);
 	efree(ring);
 }
 
