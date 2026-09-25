@@ -110,6 +110,8 @@ typedef struct {
 	HashTable *io_orphans;                /* stream pointer key -> php_io_queue, ops kept by a queue past their frame */
 	HashTable *io_reaped;                 /* pid -> wait status of children reaped through a ProcessHandle */
 	HashTable *io_addrinfo;               /* address lists built by a provider, freed by php_io_freeaddrinfo() */
+	uint32_t io_hooks_locked;             /* provider callbacks on the stack that forbid replacing the provider */
+	bool io_shut_down;                    /* php_io_hooks_request_shutdown() ran: no core queue any more */
 #ifdef HAVE_GETHOSTBYNAME_R
 	struct hostent tmp_host_info;
 	char *tmp_host_buf;

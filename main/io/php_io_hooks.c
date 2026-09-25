@@ -326,9 +326,21 @@ PHPAPI bool php_io_hooks_active(void)
 	return FG(io_hooks) != NULL;
 }
 
+/* A bailout while an op was suspended skipped its frame end */
+static void php_io_unfreeze_list(HashTable *list)
+{
+	zend_resource *res;
+	ZEND_HASH_FOREACH_PTR(list, res) {
+		if (res->type == php_file_le_stream() || res->type == php_file_le_pstream()) {
+			((php_stream *) res->ptr)->flags &= ~PHP_STREAM_FLAG_IN_USE;
+		}
+	} ZEND_HASH_FOREACH_END();
+}
+
 PHPAPI void php_io_hooks_request_shutdown(void)
 {
 	php_io_hooks_register(NULL, 0, NULL);
+	FG(io_shut_down) = true;
 	if (FG(io_queue)) {
 		php_io_queue *q = FG(io_queue);
 		FG(io_queue) = NULL;
@@ -351,6 +363,11 @@ PHPAPI void php_io_hooks_request_shutdown(void)
 		zend_hash_destroy(FG(io_orphans));
 		efree(FG(io_orphans));
 		FG(io_orphans) = NULL;
+	}
+	if (FG(io_ops_in_flight)) {
+		php_io_unfreeze_list(&EG(regular_list));
+		php_io_unfreeze_list(&EG(persistent_list));
+		FG(io_ops_in_flight) = 0;
 	}
 	if (FG(io_reaped)) {
 		zend_hash_destroy(FG(io_reaped));
@@ -616,10 +633,59 @@ static zend_result php_io_run_sync_timer(php_io_op *op, php_io_op_result *result
 	return SUCCESS;
 }
 
+/* After the request shutdown destroyed the core queue: streams closed later
+ * wait with a plain poll(2) rather than creating a queue nobody frees */
+static zend_result php_io_run_sync_direct(php_io_op *op, php_io_op_result *result)
+{
+	uint32_t events = op->type == PHP_IO_OP_POLL ? op->u.poll.events : op->ready_events;
+	int pevents = ((events & PHP_POLL_READ) ? POLLIN : 0) | ((events & PHP_POLL_WRITE) ? POLLOUT : 0)
+			| ((events & PHP_POLL_PRI) ? POLLPRI : 0);
+
+	result->index = 0;
+	result->res = 0;
+	result->error = 0;
+
+	if (op->fd == SOCK_ERR || op->type == PHP_IO_OP_ANY || !pevents) {
+		result->status = PHP_IO_UNSUPPORTED;
+		return SUCCESS;
+	}
+
+	int n;
+	for (;;) {
+		int timeout = -1;
+		if (!php_deadline_is_infinite(&op->deadline)) {
+			zend_hrtime_t ms = (php_io_deadline_remaining(&op->deadline, zend_hrtime()) + 999999) / 1000000;
+			timeout = ms > INT_MAX ? INT_MAX : (int) ms;
+		}
+		n = php_pollfd_for_ms(op->fd, pevents, timeout);
+		if (n >= 0 || php_socket_errno() != EINTR) {
+			break;
+		}
+	}
+
+	if (n < 0) {
+		result->status = PHP_IO_DONE;
+		result->res = -1;
+		result->error = php_socket_errno();
+	} else if (n == 0) {
+		result->status = PHP_IO_TIMEOUT;
+	} else {
+		uint32_t revents = ((n & POLLIN) ? PHP_POLL_READ : 0) | ((n & POLLOUT) ? PHP_POLL_WRITE : 0)
+				| ((n & POLLPRI) ? PHP_POLL_PRI : 0) | ((n & (POLLERR | POLLNVAL)) ? PHP_POLL_ERROR : 0)
+				| ((n & POLLHUP) ? PHP_POLL_HUP : 0);
+		result->status = op->type == PHP_IO_OP_POLL ? PHP_IO_DONE : PHP_IO_READY;
+		result->res = revents;
+	}
+	return SUCCESS;
+}
+
 static zend_result php_io_run_sync(php_io_op *op, php_io_op_result *result)
 {
 	if (op->type == PHP_IO_OP_TIMER) {
 		return php_io_run_sync_timer(op, result);
+	}
+	if (FG(io_shut_down)) {
+		return php_io_run_sync_direct(op, result);
 	}
 
 	php_io_queue *q = php_io_core_queue();
@@ -667,7 +733,10 @@ PHPAPI zend_result php_io_run(php_io_op *op, php_io_op_result *result)
 {
 	FG(io_ops_in_flight)++;
 	zend_result rc = php_io_run_ex(op, result);
-	FG(io_ops_in_flight)--;
+	/* Reset by the request shutdown after a bailout abandoned frames */
+	if (FG(io_ops_in_flight)) {
+		FG(io_ops_in_flight)--;
+	}
 	return rc;
 }
 
