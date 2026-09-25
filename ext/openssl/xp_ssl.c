@@ -250,10 +250,6 @@ typedef struct _php_openssl_netstream_data_t {
 	php_openssl_early_data_state_t early_data_state;
 #endif
 	char *url_name;
-	/* Recv target while a provider is active: an orphaned op may still
-	 * write into it after OpenSSL released its own read buffer */
-	char *bio_rbuf;
-	size_t bio_rbuf_size;
 	unsigned state_set:1;
 	/* The last transport op was cancelled */
 	unsigned io_cancelled:1;
@@ -441,22 +437,9 @@ static int php_openssl_stream_bio_io(BIO *bio, char *buf, int len, bool read)
 	}
 
 	if (sslsock->deadline != NULL) {
-		if (read) {
-			char *target = buf;
-			if (php_io_hooks_active()) {
-				if (sslsock->bio_rbuf_size < (size_t) len) {
-					sslsock->bio_rbuf = perealloc(sslsock->bio_rbuf, len, php_stream_is_persistent(stream));
-					sslsock->bio_rbuf_size = len;
-				}
-				target = sslsock->bio_rbuf;
-			}
-			n = php_io_recv(stream, sslsock->s.socket, target, len, 0, sslsock->deadline);
-			if (n > 0 && target != buf) {
-				memcpy(buf, target, n);
-			}
-		} else {
-			n = php_io_send(stream, sslsock->s.socket, buf, len, 0, sslsock->deadline);
-		}
+		n = read
+			? php_io_recv(stream, sslsock->s.socket, buf, len, 0, sslsock->deadline)
+			: php_io_send(stream, sslsock->s.socket, buf, len, 0, sslsock->deadline);
 		if (n < 0 && php_socket_errno() == ECANCELED) {
 			sslsock->io_cancelled = 1;
 			/* Still frozen: the op outlived the call and owns the socket's data */
@@ -3424,10 +3407,6 @@ static int php_openssl_sockop_close(php_stream *stream, int close_handle) /* {{{
 
 	if (sslsock->url_name) {
 		pefree(sslsock->url_name, php_stream_is_persistent(stream));
-	}
-
-	if (sslsock->bio_rbuf) {
-		pefree(sslsock->bio_rbuf, php_stream_is_persistent(stream));
 	}
 
 	if (sslsock->reneg) {
