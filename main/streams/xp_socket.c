@@ -90,7 +90,7 @@ static ssize_t php_sockop_write(php_stream *stream, const char *buf, size_t coun
 		char *estr;
 		int err = php_socket_errno();
 
-		if (err == ETIMEDOUT && sock->is_blocked) {
+		if (err == PHP_IO_SOCK_ETIMEDOUT && sock->is_blocked) {
 			sock->timeout_event = true;
 		} else if (PHP_IS_TRANSIENT_ERROR(err)) {
 			/* EWOULDBLOCK/EAGAIN is not an error for a non-blocking stream.
@@ -140,7 +140,7 @@ static ssize_t php_sockop_read(php_stream *stream, char *buf, size_t count)
 
 		nr_bytes = php_io_recv(stream, sock->socket, buf, XP_SOCK_BUF_SIZE(count), 0, &deadline);
 		err = php_socket_errno();
-		if (nr_bytes < 0 && err == ETIMEDOUT) {
+		if (nr_bytes < 0 && err == PHP_IO_SOCK_ETIMEDOUT) {
 			if (dont_wait) {
 				return 0;
 			}

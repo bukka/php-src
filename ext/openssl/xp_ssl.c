@@ -451,7 +451,7 @@ static int php_openssl_stream_bio_io(BIO *bio, char *buf, int len, bool read)
 	}
 
 	int err = php_socket_errno();
-	if (PHP_IS_TRANSIENT_ERROR(err) || err == EINTR || err == ETIMEDOUT) {
+	if (PHP_IS_TRANSIENT_ERROR(err) || err == PHP_IO_SOCK_EINTR || err == PHP_IO_SOCK_ETIMEDOUT) {
 		if (read) {
 			BIO_set_retry_read(bio);
 		} else {

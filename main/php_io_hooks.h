@@ -169,7 +169,19 @@ PHPAPI zend_result php_io_run(php_io_op *op, php_io_op_result *result);
 /* Convenience wrappers. They return like the syscall they replace, with
  * errno set (ETIMEDOUT when the deadline passed, ECANCELED when the
  * provider cancelled). stream may be NULL for descriptors that are not
- * streams; a stream is frozen for the duration. */
+ * streams; a stream is frozen for the duration. On Windows
+ * php_socket_errno() carries the Winsock code: compare it with the
+ * PHP_IO_SOCK_* values. */
+#ifdef PHP_WIN32
+# define PHP_IO_SOCK_ETIMEDOUT WSAETIMEDOUT
+# define PHP_IO_SOCK_ECANCELED WSAECANCELLED
+# define PHP_IO_SOCK_EINTR     WSAEINTR
+#else
+# define PHP_IO_SOCK_ETIMEDOUT ETIMEDOUT
+# define PHP_IO_SOCK_ECANCELED ECANCELED
+# define PHP_IO_SOCK_EINTR     EINTR
+#endif
+
 PHPAPI int php_io_poll(php_stream *stream, php_socket_t fd, uint32_t events, php_deadline *dl);  /* revents, 0 on timeout, -1 on error */
 PHPAPI ssize_t php_io_recv(php_stream *stream, php_socket_t fd, void *buf, size_t len, int flags, php_deadline *dl);
 PHPAPI ssize_t php_io_send(php_stream *stream, php_socket_t fd, const void *buf, size_t len, int flags, php_deadline *dl);

@@ -31,10 +31,34 @@ PHPAPI void (*php_io_op_zobj_detach)(zend_object *zobj) = NULL;
 
 /* The callers of the socket entry points read php_socket_errno(), which on
  * Windows is the Winsock error rather than errno */
+#ifdef PHP_WIN32
+static int php_io_wsa_error(int err)
+{
+	switch (err) {
+		case EINTR: return WSAEINTR;
+		case EAGAIN: return WSAEWOULDBLOCK;
+		case EBADF: return WSAEBADF;
+		case EACCES: return WSAEACCES;
+		case EINVAL: return WSAEINVAL;
+		case EMFILE: return WSAEMFILE;
+		case ETIMEDOUT: return WSAETIMEDOUT;
+		case ECANCELED: return WSAECANCELLED;
+		case ENOTSUP: return WSAEOPNOTSUPP;
+		case EALREADY: return WSAEALREADY;
+		case EISCONN: return WSAEISCONN;
+		case ENOTCONN: return WSAENOTCONN;
+		case ECONNREFUSED: return WSAECONNREFUSED;
+		case ECONNRESET: return WSAECONNRESET;
+		case ECONNABORTED: return WSAECONNABORTED;
+		default: return err;
+	}
+}
+#endif
+
 static zend_always_inline void php_io_set_errno(int err)
 {
 #ifdef PHP_WIN32
-	WSASetLastError(err);
+	WSASetLastError(php_io_wsa_error(err));
 #endif
 	errno = err;
 }
