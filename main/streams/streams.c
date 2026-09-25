@@ -1719,6 +1719,12 @@ PHPAPI zend_result _php_stream_copy_to_stream_ex(php_stream *src, php_stream *de
 		if (php_stream_cast(src, PHP_STREAM_AS_FD_FOR_COPY, (void *) &src_copy_fd, 0) == SUCCESS &&
 				php_stream_cast(dest, PHP_STREAM_AS_FD_FOR_COPY, (void *) &dest_copy_fd, 0) == SUCCESS) {
 
+			/* Waits on a socket or pipe belong to the provider */
+			if (php_io_hooks_active()
+					&& (src_copy_fd.fd_type != PHP_IO_FD_FILE || dest_copy_fd.fd_type != PHP_IO_FD_FILE)) {
+				goto fallback;
+			}
+
 			/* copy_file_range does not work with O_APPEND */
 			if (src_copy_fd.fd_type == PHP_IO_FD_FILE && dest_copy_fd.fd_type == PHP_IO_FD_FILE) {
 				int dest_flags = 0;
