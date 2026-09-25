@@ -8,6 +8,10 @@ $standard = new ReflectionExtension('standard');
 $classNames = $standard->getClassNames();
 sort($classNames);
 foreach ($classNames as $className) {
+    /* Only with --with-ior, see ReflectionExtension_getClassNames_ring.phpt */
+    if (str_starts_with($className, 'Io\\Ring\\')) {
+        continue;
+    }
     echo $className, PHP_EOL;
 }
 ?>
@@ -57,10 +61,6 @@ Io\Poll\SignalHandle
 Io\Poll\TimerHandle
 Io\Poll\Watcher
 Io\Poll\WeakHandle
-Io\Ring\Backend
-Io\Ring\Engine
-Io\Ring\FailedRingOperationException
-Io\Ring\RingException
 RoundingMode
 SortDirection
 StreamBucket
