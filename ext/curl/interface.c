@@ -2474,6 +2474,11 @@ static zend_object *php_curl_socket_handle_create_object(zend_class_entry *ce)
 	return &intern->std;
 }
 
+ZEND_METHOD(Io_Curl_SocketWeakHandle, __construct)
+{
+	zend_throw_error(NULL, "Cannot directly construct Io\\Curl\\SocketWeakHandle");
+}
+
 /* One socket libcurl wants watched, attached to it with curl_multi_assign() */
 typedef struct _php_curl_socket_entry {
 	curl_socket_t socket;
@@ -2483,6 +2488,13 @@ typedef struct _php_curl_socket_entry {
 	uint32_t op_events;
 	struct _php_curl_socket_entry *next_removed;
 } php_curl_socket_entry;
+
+static void php_curl_socket_entry_invalidate(php_curl_socket_entry *e)
+{
+	php_poll_handle_object *h = PHP_POLL_HANDLE_OBJ_FROM_ZOBJ(e->handle);
+	((php_curl_socket_handle_data *)h->handle_data)->socket = CURL_SOCKET_BAD;
+	php_poll_handle_invalidate(e->handle);
+}
 
 static void php_curl_socket_entry_free(php_curl_socket_entry *e)
 {
@@ -2494,11 +2506,6 @@ static void php_curl_socket_entry_free(php_curl_socket_entry *e)
 
 /* CURLMOPT_SOCKETFUNCTION: bookkeeping only, never a provider call. On
  * CURL_POLL_REMOVE the handle is invalidated here, inside the callback,
-ZEND_METHOD(Io_Curl_SocketWeakHandle, __construct)
-{
-	zend_throw_error(NULL, "Cannot directly construct Io\\Curl\\SocketWeakHandle");
-}
-
  * because libcurl closes the socket right after. */
 static int php_curl_socket_callback(CURL *easy, curl_socket_t s, int what, void *userp, void *socketp)
 {
@@ -2507,9 +2514,7 @@ static int php_curl_socket_callback(CURL *easy, curl_socket_t s, int what, void 
 
 	if (what == CURL_POLL_REMOVE) {
 		if (e) {
-			php_poll_handle_object *h = PHP_POLL_HANDLE_OBJ_FROM_ZOBJ(e->handle);
-			((php_curl_socket_handle_data *)h->handle_data)->socket = CURL_SOCKET_BAD;
-			php_poll_handle_invalidate(e->handle);
+			php_curl_socket_entry_invalidate(e);
 			zend_hash_index_del(ch->io_sockets, (zend_ulong)s);
 			e->next_removed = ch->io_removed;
 			ch->io_removed = e;
@@ -2540,7 +2545,7 @@ static int php_curl_socket_callback(CURL *easy, curl_socket_t s, int what, void 
 	return 0;
 }
 
-/* CURLMOPT_TIMERFUNCTION: record the requested timeout */
+/* CURLMOPT_TIMERFUNCTION: the timeout is relative to this call */
 static int php_curl_timer_callback(CURLM *multi, long timeout_ms, void *userp)
 {
 	php_curl *ch = (php_curl *)userp;
@@ -2595,8 +2600,9 @@ static zend_result php_curl_socket_reconcile(php_curl *ch)
 	return SUCCESS;
 }
 
-/* Drops every socket entry. libcurl has reported REMOVE for all of them by
- * the time the multi handle is cleaned up. */
+/* Drops every socket entry. Ones libcurl never reported REMOVE for, as after
+ * a bailout in a transfer, are invalidated here: their socket goes with the
+ * multi handle. */
 static void php_curl_socket_table_free(php_curl *ch)
 {
 	while (ch->io_removed) {
@@ -2607,6 +2613,7 @@ static void php_curl_socket_table_free(php_curl *ch)
 	if (ch->io_sockets) {
 		php_curl_socket_entry *e;
 		ZEND_HASH_FOREACH_PTR(ch->io_sockets, e) {
+			php_curl_socket_entry_invalidate(e);
 			php_curl_socket_entry_free(e);
 		} ZEND_HASH_FOREACH_END();
 		zend_hash_destroy(ch->io_sockets);
