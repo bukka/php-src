@@ -3324,8 +3324,6 @@ static ssize_t php_openssl_sockop_io(int read, php_stream *stream, char *buf, si
 static int php_openssl_sockop_close(php_stream *stream, int close_handle) /* {{{ */
 {
 	php_openssl_netstream_data_t *sslsock = (php_openssl_netstream_data_t*)stream->abstract;
-#ifdef PHP_WIN32
-#endif
 	unsigned i;
 
 	if (close_handle) {
