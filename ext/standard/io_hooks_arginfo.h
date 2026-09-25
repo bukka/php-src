@@ -1,5 +1,5 @@
 /* This is a generated file, edit io_hooks.stub.php instead.
- * Stub hash: afd88e912f147555020c980a2e7ca6c482f22a2e
+ * Stub hash: a02d07f598d87ccaf38a5d044cdc111e750e0639
  * Has decl header: yes */
 
 #include "zend_enum.h"

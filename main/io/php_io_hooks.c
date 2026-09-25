@@ -895,7 +895,7 @@ static int php_io_poll_result_to_revents(const php_io_op_result *result, uint32_
 				php_io_set_errno(result->error);
 				return -1;
 			}
-			return result->res ? (int) result->res : (int) events;
+			return result->res > 0 && result->res <= INT_MAX ? (int) result->res : (int) events;
 		case PHP_IO_TIMEOUT:
 			php_io_set_errno(ETIMEDOUT);
 			return 0;

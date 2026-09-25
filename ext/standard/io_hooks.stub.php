@@ -25,8 +25,10 @@ namespace Io {
         private function __construct() {}
 
         /**
-         * A WeakHandle for descriptor based operations; null for Timer, DNS,
-         * Fsync and Any.
+         * A WeakHandle for descriptor based operations and Fsync, a
+         * TimerHandle for Timer, a ProcessHandle for WaitPid on one child,
+         * a SignalHandle for SigWait; null for DNS, Any and WaitPid on any
+         * child. The generic handles are created on the first call.
          */
         public function getHandle(): ?Poll\Handle {}
 

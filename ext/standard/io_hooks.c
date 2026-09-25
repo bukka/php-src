@@ -54,6 +54,7 @@ PHPAPI zend_class_entry *php_io_operation_queue_ce;
 static zend_class_entry *php_io_poll_operation_queue_ce;
 static zend_class_entry *php_io_hooks_ce;
 static zend_class_entry *php_io_hooks_capability_ce;
+static zend_class_entry *php_io_poll_context_ce;
 
 static zend_object_handlers php_io_operation_handlers;
 static zend_object_handlers php_io_completion_handlers;
@@ -377,9 +378,13 @@ PHP_METHOD(Io_Operation, completeReady)
 		RETURN_THROWS();
 	}
 
+	if (zend_hash_num_elements(Z_ARRVAL_P(events_zv)) == 0) {
+		zend_argument_value_error(1, "must not be empty");
+		RETURN_THROWS();
+	}
 	uint32_t events = php_io_poll_event_enums_to_events(events_zv);
 	if (!events) {
-		zend_argument_type_error(1, "must be a non-empty array of Io\\Poll\\Event enums");
+		zend_argument_type_error(1, "must be a list of Io\\Poll\\Event enums");
 		RETURN_THROWS();
 	}
 
@@ -517,6 +522,10 @@ PHP_METHOD(Io_Operation_GetAddrInfo, completeWithAddresses)
 			zend_argument_type_error(1, "must be a list of IP address strings");
 			goto fail;
 		}
+		if (zend_str_has_nul_byte(Z_STR_P(entry))) {
+			zend_argument_value_error(1, "must not contain any null bytes");
+			goto fail;
+		}
 		struct sockaddr_storage ss;
 		socklen_t len;
 		memset(&ss, 0, sizeof(ss));
@@ -587,9 +596,9 @@ PHP_METHOD(Io_Operation_GetNameInfo, completeWithName)
 	zend_string *host, *service = NULL;
 
 	ZEND_PARSE_PARAMETERS_START(1, 2)
-		Z_PARAM_STR(host)
+		Z_PARAM_PATH_STR(host)
 		Z_PARAM_OPTIONAL
-		Z_PARAM_STR_OR_NULL(service)
+		Z_PARAM_PATH_STR_OR_NULL(service)
 	ZEND_PARSE_PARAMETERS_END();
 
 	php_io_op *op = php_io_operation_fetch_type(ZEND_THIS, PHP_IO_OP_GETNAMEINFO);
@@ -666,18 +675,29 @@ PHP_METHOD(Io_Operation_Any, completeWith)
 		RETURN_THROWS();
 	}
 
+	bool *seen = ecalloc(op->u.any.n, sizeof(bool));
 	zval *entry;
 	ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(completions), entry) {
 		if (Z_TYPE_P(entry) != IS_OBJECT || !instanceof_function(Z_OBJCE_P(entry), php_io_completion_ce)) {
+			efree(seen);
 			zend_argument_type_error(1, "must be a list of Io\\Completion objects");
 			RETURN_THROWS();
 		}
 		php_io_completion_obj *c = PHP_IO_COMPLETION_FROM_ZOBJ(Z_OBJ_P(entry));
-		if (php_io_any_member_index(op, c->operation) < 0) {
+		int32_t index = php_io_any_member_index(op, c->operation);
+		if (index < 0) {
+			efree(seen);
 			zend_argument_value_error(1, "must only contain completions of the members of this operation");
 			RETURN_THROWS();
 		}
+		if (seen[index]) {
+			efree(seen);
+			zend_argument_value_error(1, "must not contain two completions of the same member");
+			RETURN_THROWS();
+		}
+		seen[index] = true;
 	} ZEND_HASH_FOREACH_END();
+	efree(seen);
 
 	php_io_completion_create(return_value, op, Z_OBJ_P(ZEND_THIS), PHP_IO_DONE, 0, 0, NULL, completions);
 }
@@ -816,7 +836,7 @@ PHP_METHOD(Io_Poll_OperationQueue, __construct)
 
 	ZEND_PARSE_PARAMETERS_START(0, 1)
 		Z_PARAM_OPTIONAL
-		Z_PARAM_OBJECT_OR_NULL(context)
+		Z_PARAM_OBJECT_OF_CLASS_OR_NULL(context, php_io_poll_context_ce)
 	ZEND_PARSE_PARAMETERS_END();
 
 	php_io_opqueue_obj *intern = PHP_IO_OPQUEUE_FROM_ZOBJ(Z_OBJ_P(ZEND_THIS));
@@ -1413,6 +1433,8 @@ PHP_MINIT_FUNCTION(io_hooks)
 	PHP_IO_REGISTER_DATA_OP(php_io_operation_waitpid_ce, WaitPid);
 	PHP_IO_REGISTER_DATA_OP(php_io_operation_sigwait_ce, SigWait);
 #undef PHP_IO_REGISTER_DATA_OP
+	/* Every operation type is ours: userland may not add one */
+	php_io_operation_ce->ce_flags |= ZEND_ACC_FINAL;
 
 	php_io_completion_ce = register_class_Io_Completion();
 	php_io_completion_ce->create_object = php_io_completion_create_object;
@@ -1436,6 +1458,9 @@ PHP_MINIT_FUNCTION(io_hooks)
 	php_io_opqueue_handlers.get_gc = php_io_poll_operation_queue_get_gc;
 	php_io_opqueue_handlers.clone_obj = NULL;
 	php_io_poll_operation_queue_ce->default_object_handlers = &php_io_opqueue_handlers;
+
+	php_io_poll_context_ce = zend_hash_str_find_ptr(CG(class_table), ZEND_STRL("io\\poll\\context"));
+	ZEND_ASSERT(php_io_poll_context_ce != NULL);
 
 	php_io_hooks_ce = register_class_Io_Hooks_Hooks();
 	php_io_hooks_capability_ce = register_class_Io_Hooks_Capability();
