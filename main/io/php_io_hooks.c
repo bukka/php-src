@@ -815,18 +815,16 @@ static zend_result php_io_run_sync(php_io_op *op, php_io_op_result *result)
 
 	php_io_queue_completion c;
 	int n;
+	/* Without a provider a blocking op keeps waiting through signals, as
+	 * the poll loops it replaced did; the handler runs when it returns */
 	do {
 		n = q->ops->wait(q, &c, 1, NULL);
-	} while (n == 0);
+	} while (n == 0 || (n < 0 && errno == EINTR));
 
 	if (n < 0) {
 		int err = errno;
 		if (op->queue) {
 			q->ops->orphan(q, op);
-		}
-		if (err == EINTR) {
-			result->status = PHP_IO_INTERRUPTED;
-			return SUCCESS;
 		}
 		result->status = PHP_IO_DONE;
 		result->error = err ? err : EIO;
