@@ -2783,6 +2783,11 @@ PHP_FUNCTION(socket_export_stream)
 	stream_data->is_blocked = socket->blocking;
 	stream_data->timeout.tv_sec = FG(default_socket_timeout);
 	stream_data->timeout.tv_usec = 0;
+	stream_data->restore_blocking = false;
+	php_netstream_set_nonblocking(stream_data);
+#ifdef PHP_WIN32
+	stream_data->restore_blocking = socket->blocking;
+#endif
 
 	php_stream_to_zval(stream, &socket->zstream);
 
