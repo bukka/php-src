@@ -4,7 +4,6 @@ Io\Poll\SignalHandle: the signals it blocks stay unblocked in exec'd children, m
 pcntl
 --SKIPIF--
 <?php
-if (PHP_ZTS) die("skip SignalHandle is refused in thread-safe builds");
 if (!is_readable('/proc/self/status')) die("skip needs /proc/self/status");
 if (!Io\Poll\Backend::Auto->supportsSignalHandles()) die("skip no signal handle source on this platform");
 ?>

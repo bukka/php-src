@@ -5,7 +5,6 @@ posix
 pcntl
 --SKIPIF--
 <?php
-if (PHP_ZTS) die("skip SignalHandle is refused in thread-safe builds");
 if (!Io\Poll\Backend::Auto->supportsSignalHandles()) die("skip no signal handle source on this platform");
 ?>
 --FILE--

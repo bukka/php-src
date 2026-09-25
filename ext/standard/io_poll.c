@@ -16,6 +16,7 @@
 #include "zend_enum.h"
 #include "zend_exceptions.h"
 #include "zend_signal.h"
+#include "SAPI.h"
 #include "php_network.h"
 #include "php_poll.h"
 #include "io_poll.h"
@@ -1224,11 +1225,14 @@ PHP_METHOD(Io_Poll_SignalHandle, __construct)
 		RETURN_THROWS();
 	}
 #ifdef ZTS
-	/* The mask is per thread: another thread of the process would take the
-	 * signal with its default action and the handle would never see it */
-	zend_throw_exception(php_io_poll_exception_class_entry,
-		"Io\\Poll\\SignalHandle is not available in thread-safe builds", 0);
-	RETURN_THROWS();
+	/* The mask is per thread: in a multi-threaded SAPI another thread would
+	 * take the signal with its default action and the handle would never
+	 * see it. The CLI runs one PHP thread. */
+	if (strcmp(sapi_module.name, "cli") != 0) {
+		zend_throw_exception(php_io_poll_exception_class_entry,
+			"Io\\Poll\\SignalHandle is only available in the CLI in thread-safe builds", 0);
+		RETURN_THROWS();
+	}
 #endif
 	if (zend_hash_num_elements(signals) == 0) {
 		zend_argument_must_not_be_empty_error(1);
