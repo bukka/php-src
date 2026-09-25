@@ -2,6 +2,10 @@
 Io\Poll\SignalHandle: signals that cannot be blocked, fault signals and non-integers are refused
 --EXTENSIONS--
 pcntl
+--SKIPIF--
+<?php
+if (PHP_ZTS) die("skip SignalHandle is refused in thread-safe builds");
+?>
 --FILE--
 <?php
 $cases = [[SIGKILL], [SIGSTOP], [SIGSEGV], [SIGBUS], [SIGFPE], [SIGILL], [0], [-1], [PHP_INT_MAX], ["15"], [1.0], [null], [SIGUSR1, "x"]];

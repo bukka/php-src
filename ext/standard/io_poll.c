@@ -15,6 +15,7 @@
 #include "php.h"
 #include "zend_enum.h"
 #include "zend_exceptions.h"
+#include "zend_signal.h"
 #include "php_network.h"
 #include "php_poll.h"
 #include "io_poll.h"
@@ -969,6 +970,66 @@ PHPAPI void php_io_poll_signal_child_mask(sigset_t *mask)
 }
 #endif
 
+#ifndef PHP_WIN32
+static bool php_io_poll_signal_no_handler(const struct sigaction *act)
+{
+	/* sa_handler and sa_sigaction share storage; pcntl sets SA_SIGINFO even for SIG_DFL */
+	return act->sa_handler == SIG_DFL || act->sa_handler == SIG_IGN;
+}
+
+/* Whether a delivery runs a handler. With zend_signal the signals it manages
+ * always have its trampoline installed, and the handler PHP code set is in
+ * zend_sigaction(); any other signal has what sigaction() reports. */
+static bool php_io_poll_signal_has_handler(int signo)
+{
+	struct sigaction act;
+	memset(&act, 0, sizeof(act));
+	if (sigaction(signo, NULL, &act) != 0) {
+		return true;
+	}
+	if (php_io_poll_signal_no_handler(&act)) {
+		return false;
+	}
+# ifdef ZEND_SIGNALS
+	switch (signo) {
+		case SIGPROF: case SIGHUP: case SIGINT: case SIGQUIT:
+		case SIGTERM: case SIGUSR1: case SIGUSR2: case SIGALRM:
+			memset(&act, 0, sizeof(act));
+			zend_sigaction(signo, NULL, &act);
+			return !php_io_poll_signal_no_handler(&act);
+	}
+# endif
+	return true;
+}
+
+/* A signal still pending when the handle goes would be delivered on unblock;
+ * one that nothing handles takes its default action, which mostly ends the
+ * process. Setting SIG_IGN discards a pending signal (POSIX), so do that for
+ * those and leave the ones with a handler pending for it. */
+static void php_io_poll_signal_discard_fatal(sigset_t *unblock)
+{
+	sigset_t pending;
+	if (sigpending(&pending) != 0) {
+		return;
+	}
+	for (int signo = 1; signo < NSIG; signo++) {
+		if (sigismember(unblock, signo) != 1 || sigismember(&pending, signo) != 1) {
+			continue;
+		}
+		if (php_io_poll_signal_has_handler(signo)) {
+			continue;
+		}
+		struct sigaction raw, ign;
+		memset(&ign, 0, sizeof(ign));
+		ign.sa_handler = SIG_IGN;
+		sigemptyset(&ign.sa_mask);
+		if (sigaction(signo, &ign, &raw) == 0) {
+			sigaction(signo, &raw, NULL);
+		}
+	}
+}
+#endif
+
 static php_socket_t php_io_poll_signal_handle_get_fd(php_poll_handle_object *handle)
 {
 	php_io_poll_signal_handle_data *data = handle->handle_data;
@@ -1003,6 +1064,7 @@ static void php_io_poll_signal_handle_cleanup(php_poll_handle_object *handle)
 			}
 		}
 		if (any) {
+			php_io_poll_signal_discard_fatal(&unblock);
 			php_io_poll_sigmask(SIG_UNBLOCK, &unblock, NULL);
 		}
 #endif
@@ -1134,6 +1196,20 @@ static bool php_io_poll_signal_unwatchable(zend_long signo)
 	}
 }
 
+/* max_execution_time runs on this signal; blocking it disables the timeout */
+static bool php_io_poll_signal_is_engine_timeout(zend_long signo)
+{
+#if defined(ZEND_MAX_EXECUTION_TIMERS)
+	return signo == SIGRTMIN;
+#elif defined(PHP_WIN32)
+	return false;
+#elif defined(__CYGWIN__) || defined(__PASE__) || (defined(__aarch64__) && defined(__APPLE__))
+	return signo == SIGALRM;
+#else
+	return signo == SIGPROF;
+#endif
+}
+
 PHP_METHOD(Io_Poll_SignalHandle, __construct)
 {
 	HashTable *signals;
@@ -1147,6 +1223,13 @@ PHP_METHOD(Io_Poll_SignalHandle, __construct)
 		zend_throw_error(NULL, "Io\\Poll\\SignalHandle object is already constructed");
 		RETURN_THROWS();
 	}
+#ifdef ZTS
+	/* The mask is per thread: another thread of the process would take the
+	 * signal with its default action and the handle would never see it */
+	zend_throw_exception(php_io_poll_exception_class_entry,
+		"Io\\Poll\\SignalHandle is not available in thread-safe builds", 0);
+	RETURN_THROWS();
+#endif
 	if (zend_hash_num_elements(signals) == 0) {
 		zend_argument_must_not_be_empty_error(1);
 		RETURN_THROWS();
@@ -1168,6 +1251,10 @@ PHP_METHOD(Io_Poll_SignalHandle, __construct)
 		}
 		if (php_io_poll_signal_unwatchable(signo)) {
 			zend_argument_value_error(1, "must not contain signal " ZEND_LONG_FMT ", which cannot be blocked", signo);
+			RETURN_THROWS();
+		}
+		if (php_io_poll_signal_is_engine_timeout(signo)) {
+			zend_argument_value_error(1, "must not contain signal " ZEND_LONG_FMT ", which the execution timeout uses", signo);
 			RETURN_THROWS();
 		}
 		if (php_sigaddset(&set, (int) signo) != 0) {
