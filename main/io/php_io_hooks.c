@@ -559,7 +559,10 @@ static void php_io_op_finish(php_io_op *op)
 	if (op->type == PHP_IO_OP_ANY) {
 		for (uint32_t i = 0; i < op->u.any.n; i++) {
 			php_io_op *m = op->u.any.ops[i];
-			ZEND_ASSERT(!m->queue);
+			/* A member the provider submitted on its own */
+			if (m->queue) {
+				m->queue->ops->orphan(m->queue, m);
+			}
 			if (!(m->flags & PHP_IO_OP_F_PERSISTENT)) {
 				php_io_op_detach_zobj(m);
 			}
@@ -892,19 +895,27 @@ typedef struct {
 	zend_object *handle;
 } php_io_frame;
 
-static void php_io_frame_begin(php_io_frame *f, php_stream *stream)
+/* Fails with the Error of argument parsing when the stream is frozen by an
+ * op of another flow: internal consumers reach streams without it */
+static zend_result php_io_frame_begin(php_io_frame *f, php_stream *stream)
 {
 	f->stream = stream;
 	f->handle = NULL;
 	if (stream) {
+		if (UNEXPECTED(stream->flags & PHP_STREAM_FLAG_IN_USE)) {
+			f->stream = NULL;
+			zend_throw_error(NULL, "Concurrent access to a stream");
+			php_io_set_errno(ECANCELED);
+			return FAILURE;
+		}
 		if (FG(io_hooks)) {
 			zval handle_zv;
 			php_stream_poll_weak_handle_from_stream(&handle_zv, stream);
 			f->handle = Z_OBJ(handle_zv);
 		}
-		ZEND_ASSERT(!(stream->flags & PHP_STREAM_FLAG_IN_USE));
 		stream->flags |= PHP_STREAM_FLAG_IN_USE;
 	}
+	return SUCCESS;
 }
 
 static void php_io_frame_end(php_io_frame *f, php_io_op *op)
@@ -929,7 +940,9 @@ PHPAPI int php_io_poll(php_stream *stream, php_socket_t fd, uint32_t events, php
 	php_io_op_result result;
 	php_io_frame f;
 
-	php_io_frame_begin(&f, stream);
+	if (php_io_frame_begin(&f, stream) == FAILURE) {
+		return -1;
+	}
 	php_io_op_poll(&op, f.handle, fd, events, *dl);
 	op.stream = stream;
 	zend_result rc = php_io_run(&op, &result);
@@ -984,7 +997,9 @@ static bool php_io_data_result(const php_io_op_result *result, ssize_t *ret)
 		ssize_t ret; \
 		bool direct = (php_io_hook_flags() & PHP_IO_HOOKS_F_DIRECT) != 0; \
 		bool waited = false; \
-		php_io_frame_begin(&f, stream); \
+		if (php_io_frame_begin(&f, stream) == FAILURE) { \
+			return -1; \
+		} \
 		memset(&op, 0, sizeof(op)); \
 		for (;;) { \
 			if (!direct) { \
@@ -1102,7 +1117,9 @@ PHPAPI int php_io_connect(php_stream *stream, php_socket_t fd, const struct sock
 	bool direct = (php_io_hook_flags() & PHP_IO_HOOKS_F_DIRECT) != 0;
 	bool started = false;   /* our own connect() is in progress */
 
-	php_io_frame_begin(&f, stream);
+	if (php_io_frame_begin(&f, stream) == FAILURE) {
+		return -1;
+	}
 	memset(&op, 0, sizeof(op));
 
 	if (!direct) {
@@ -1180,7 +1197,9 @@ static ssize_t php_io_file_op(php_stream *stream, int fd, php_deadline *dl, bool
 	php_io_op_result result;
 	ssize_t ret;
 
-	php_io_frame_begin(&f, stream);
+	if (php_io_frame_begin(&f, stream) == FAILURE) {
+		return -1;
+	}
 	memset(&op, 0, sizeof(op));
 
 	bool offload = FG(io_hooks) && (regular ? (flags & PHP_IO_HOOKS_F_FILES) : (flags & (PHP_IO_HOOKS_F_FILES | PHP_IO_HOOKS_F_DIRECT)));
@@ -1292,7 +1311,9 @@ PHPAPI int php_io_fsync(php_stream *stream, int fd, bool data_only)
 		php_io_op_result result;
 		ssize_t ret;
 
-		php_io_frame_begin(&f, stream);
+		if (php_io_frame_begin(&f, stream) == FAILURE) {
+			return -1;
+		}
 		php_io_op_fsync(&op, f.handle, fd, data_only);
 		op.stream = stream;
 		zend_result rc = php_io_run(&op, &result);

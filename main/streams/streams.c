@@ -337,6 +337,12 @@ fprintf(stderr, "stream_free: %s:%p[%s] preserve_handle=%d release_cast=%d remov
 		(close_options & PHP_STREAM_FREE_RSRC_DTOR) == 0);
 #endif
 
+	/* An operation a queue kept past its frame must settle before the flush
+	 * reuses the stream and the close frees the buffer */
+	if ((close_options & PHP_STREAM_FREE_CALL_DTOR) && (stream->flags & PHP_STREAM_FLAG_IN_USE)) {
+		php_io_stream_drain(stream);
+	}
+
 	int flush_result;
 	if (stream->flags & PHP_STREAM_FLAG_WAS_WRITTEN || stream->writefilters.head) {
 		/* make sure everything is saved */
@@ -371,12 +377,6 @@ fprintf(stderr, "stream_free: %s:%p[%s] preserve_handle=%d release_cast=%d remov
 				ret = flush_result;
 			}
 			return ret;
-		}
-
-		/* An operation a queue kept past its frame must settle before the
-		 * buffer goes away */
-		if (stream->flags & PHP_STREAM_FLAG_IN_USE) {
-			php_io_stream_drain(stream);
 		}
 
 		/* Watchers must unregister while the fd is still open */

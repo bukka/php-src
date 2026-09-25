@@ -331,8 +331,10 @@ static void php_io_poll_group_release_members(php_io_poll_queue *q, php_io_poll_
 {
 	for (uint32_t i = 0; i < req->n_members; i++) {
 		php_io_poll_req *m = req->members[i];
-		php_io_poll_req_unregister(q, m);
-		php_io_poll_req_free(m);
+		if (m) {
+			php_io_poll_req_unregister(q, m);
+			php_io_poll_req_free(m);
+		}
 	}
 	if (req->members) {
 		efree(req->members);
@@ -350,7 +352,7 @@ static void php_io_poll_group_fold(php_io_poll_queue *q, php_io_poll_req *req)
 
 	for (uint32_t i = 0; i < req->n_members; i++) {
 		php_io_poll_req *m = req->members[i];
-		if (m->done) {
+		if (m && m->done) {
 			if (op->u.any.results) {
 				op->u.any.results[n_results] = m->result;
 			}
@@ -584,6 +586,14 @@ static int php_io_poll_queue_wait(php_io_queue *base, php_io_queue_completion *o
 
 static void php_io_poll_queue_orphan(php_io_queue *base, php_io_op *op)
 {
+	php_io_poll_req *req = op->queue_data;
+	if (op->queue == base && req && req->group) {
+		/* A member going away before its Any: the group forgets it */
+		req->group->members[req->index] = NULL;
+		php_io_poll_req_unregister((php_io_poll_queue *) base, req);
+		php_io_poll_req_free(req);
+		return;
+	}
 	/* Readiness ops never reference a buffer, so this is a plain cancel */
 	php_io_poll_queue_cancel(base, op);
 }
