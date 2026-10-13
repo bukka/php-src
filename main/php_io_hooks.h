@@ -336,6 +336,9 @@ PHPAPI ssize_t php_io_pipe_read(php_stream *stream, int fd, void *buf, size_t le
 		const php_deadline *dl, bool no_provider);
 PHPAPI ssize_t php_io_pipe_write(php_stream *stream, int fd, const void *buf, size_t len,
 		bool no_provider);
+/* Waits until an overlapped pipe has data or dl passes; returns as php_io_poll() does. The data may
+ * be gone by the read: another process can read a handed-out pipe */
+PHPAPI int php_io_pipe_poll(php_stream *stream, int fd, const php_deadline *dl, bool no_provider);
 /* Bytes the pipe holds now; *eof at the other end's close; false with errno at a failure (EBADF
  * for a write end) */
 PHPAPI bool php_io_pipe_peek(int fd, DWORD *avail, bool *eof);
