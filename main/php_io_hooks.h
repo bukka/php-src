@@ -37,6 +37,7 @@ typedef enum {
 	PHP_IO_OP_FSYNC,
 	PHP_IO_OP_WAITPID,
 	PHP_IO_OP_SIGWAIT,
+	PHP_IO_OP_DIR_CHANGES,
 	PHP_IO_OP_ANY,
 } php_io_op_type;
 
@@ -122,6 +123,9 @@ struct _php_io_op {
 		struct { pid_t pid; int options; int *status; } waitpid;
 		/* fd is the signalfd, taken a signal a handle recorded */
 		struct { const php_sigset_t *set; php_siginfo_t *info; int taken; } sigwait;
+		/* fd is a directory HANDLE opened with FILE_LIST_DIRECTORY and
+		 * FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED */
+		struct { void *buf; size_t len; bool subtree; } dir_changes;
 		struct {
 			php_io_op **ops; /* caller owned */
 			uint32_t n;
@@ -172,6 +176,12 @@ PHPAPI void php_io_op_waitpid(php_io_op *op, zend_object *handle, pid_t pid, int
 		php_deadline dl);
 PHPAPI void php_io_op_sigwait(php_io_op *op, zend_object *handle, const php_sigset_t *set,
 		php_siginfo_t *info, php_deadline dl);
+/* Windows: the next changes in a directory, ReadDirectoryChangesW()'s FILE_NOTIFY_INFORMATION
+ * records in buf, which must be DWORD-aligned. Done with the bytes written; after 0 (changes were
+ * lost) or any other completion the caller rescans. A queue that cannot wait for them answers
+ * Unsupported. */
+PHPAPI void php_io_op_dir_changes(php_io_op *op, php_socket_t fd, void *buf, size_t len,
+		bool subtree);
 PHPAPI void php_io_op_any(php_io_op *op, php_io_op **members, uint32_t n, php_io_op_result *results);
 
 /* The op's handle, created for a stream op on the first call and kept by the stream: borrowed */
